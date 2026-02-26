@@ -1,39 +1,52 @@
-@echo off
-chcp 65001 >nul
-echo.
-echo ╔═══════════════════════════════════════════╗
-echo ║   FrameSnap EXE 빌드 스크립트             ║
-echo ╚═══════════════════════════════════════════╝
-echo.
+# FrameSnap – 화면 영역 녹화 & 프레임 추출기
 
-echo [1/3] 필요 패키지 설치 중...
-pip install mss pillow numpy pyinstaller --quiet
-if errorlevel 1 (
-    echo 패키지 설치 실패! Python/pip가 설치되어 있는지 확인하세요.
-    pause
-    exit /b 1
-)
+## 📦 EXE 빌드 방법 (Windows)
 
-echo [2/3] EXE 빌드 중 (1~2분 소요)...
-pyinstaller --onefile --windowed --name "FrameSnap" ^
-    --hidden-import=PIL._tkinter_finder ^
-    --hidden-import=mss ^
-    --hidden-import=mss.windows ^
-    --collect-all mss ^
-    framesnap.py
+### 사전 조건
+- Python 3.10 이상 설치 (https://python.org)
+- pip 사용 가능 상태
 
-if errorlevel 1 (
-    echo.
-    echo 빌드 실패! 오류 메시지를 확인하세요.
-    pause
-    exit /b 1
-)
+### 빌드 순서
 
-echo.
-echo [3/3] 완료!
-echo.
-echo ✅ EXE 파일 위치: dist\FrameSnap.exe
-echo.
-echo 이 파일 하나만 있으면 어디서든 실행 가능합니다.
-echo.
-pause
+1. 이 폴더 안에서 `build_exe.bat` 를 **더블클릭**
+2. 자동으로 패키지 설치 + EXE 빌드
+3. 완료 후 `dist\FrameSnap.exe` 파일 생성됨
+
+> ⏱ 빌드는 1~2분 정도 소요됩니다.
+
+---
+
+## 🎮 사용법
+
+1. `FrameSnap.exe` 실행
+2. **FPS 설정** (기본 5fps / 높을수록 더 많은 프레임 캡처)
+3. **⏺ 영역 선택 후 녹화** 버튼 클릭
+4. 마우스 드래그로 녹화할 화면 영역 선택
+5. 영상 재생 등 원하는 작업 진행
+6. **⏹ 중지** 버튼으로 녹화 종료
+7. 갤러리에서 원하는 프레임 **클릭하여 선택** (초록 테두리)
+8. **💾 선택한 프레임 PNG 저장** 클릭 → 폴더 선택 → 저장 완료
+
+---
+
+## 💡 팁
+
+| 상황 | 권장 FPS |
+|------|---------|
+| 정지 자막/슬라이드 캡처 | 1~2 FPS |
+| 일반 영상 중요 장면 추출 | 3~5 FPS |
+| 빠른 움직임 (게임 등) | 10~15 FPS |
+
+- 전체 선택 버튼으로 한꺼번에 저장 가능
+- 초기화 후 다시 녹화 가능
+- PNG 파일명: `frame_0001.png`, `frame_0002.png` ...
+
+---
+
+## 🐛 문제 해결
+
+| 문제 | 해결 |
+|------|------|
+| EXE 실행 안 됨 | Windows Defender 예외 추가 후 재실행 |
+| 빌드 오류 | `pip install --upgrade pyinstaller` 후 재시도 |
+| 화면이 까맣게 캡처됨 | 하드웨어 가속 앱은 전용 녹화 모드 필요 |
