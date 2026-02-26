@@ -18,42 +18,66 @@ except ImportError:
 
 
 # ──────────────────────────────────────────────────────────────
-# 영역 선택 오버레이
+# 영역 선택 오버레이 (개선: 빨간 굵은 선 + 크기 실시간 표시)
 # ──────────────────────────────────────────────────────────────
 class RegionSelector:
     def __init__(self, callback):
         self.callback = callback
+
+        # 반투명 검은 오버레이
         self.win = tk.Toplevel()
         self.win.attributes('-fullscreen', True)
-        self.win.attributes('-alpha', 0.25)
         self.win.attributes('-topmost', True)
         self.win.configure(bg='black')
+        self.win.attributes('-alpha', 0.45)
         self.win.lift()
         self.win.focus_force()
+
         self.canvas = tk.Canvas(self.win, cursor='cross', bg='black', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True)
-        tk.Label(self.win, text='마우스를 드래그하여 녹화 영역을 선택하세요   [ ESC = 취소 ]',
-                 bg='black', fg='white', font=('맑은 고딕', 13)).place(relx=0.5, rely=0.04, anchor='center')
+
+        # 안내 텍스트
+        self.guide = tk.Label(self.win,
+                               text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
+                               bg='black', fg='white', font=('맑은 고딕', 14, 'bold'))
+        self.guide.place(relx=0.5, rely=0.05, anchor='center')
+
+        # 크기 표시 라벨
+        self.size_lbl = tk.Label(self.win, text='', bg='#cc0000', fg='white',
+                                  font=('Consolas', 11, 'bold'), padx=8, pady=3)
+
         self.sx = self.sy = 0
         self.rect = None
-        self.canvas.bind('<ButtonPress-1>', self._press)
-        self.canvas.bind('<B1-Motion>', self._drag)
+
+        self.canvas.bind('<ButtonPress-1>',   self._press)
+        self.canvas.bind('<B1-Motion>',       self._drag)
         self.canvas.bind('<ButtonRelease-1>', self._release)
         self.win.bind('<Escape>', lambda e: self._cancel())
 
     def _press(self, e):
         self.sx, self.sy = e.x, e.y
-        self.rect = self.canvas.create_rectangle(e.x, e.y, e.x, e.y, outline='#00FFB3', width=2, dash=(5,3))
+        # 빨간색 굵은 선으로 사각형
+        self.rect = self.canvas.create_rectangle(
+            e.x, e.y, e.x, e.y,
+            outline='red', width=3
+        )
 
     def _drag(self, e):
         self.canvas.coords(self.rect, self.sx, self.sy, e.x, e.y)
+        w = abs(e.x - self.sx)
+        h = abs(e.y - self.sy)
+        # 크기 라벨을 마우스 커서 근처에 표시
+        self.size_lbl.config(text=f' {w} × {h} ')
+        lx = e.x + 14
+        ly = e.y + 14
+        self.size_lbl.place(x=lx, y=ly)
 
     def _release(self, e):
         x1, y1 = min(self.sx, e.x), min(self.sy, e.y)
         x2, y2 = max(self.sx, e.x), max(self.sy, e.y)
         self.win.destroy()
-        if x2-x1 > 20 and y2-y1 > 20:
-            self.callback({'top': y1, 'left': x1, 'width': x2-x1, 'height': y2-y1})
+        if x2 - x1 > 20 and y2 - y1 > 20:
+            self.callback({'top': y1, 'left': x1, 'width': x2 - x1, 'height': y2 - y1})
         else:
             self.callback(None)
 
@@ -63,10 +87,47 @@ class RegionSelector:
 
 
 # ──────────────────────────────────────────────────────────────
-# 녹화 중 플로팅 컨트롤 바 (영역 위에 떠있는 버튼)
+# 3초 카운트다운 오버레이
+# ──────────────────────────────────────────────────────────────
+class Countdown:
+    def __init__(self, region: dict, on_done):
+        self.on_done = on_done
+        self.count = 3
+
+        # 반투명 오버레이 (녹화 영역 위에만)
+        self.win = tk.Toplevel()
+        self.win.overrideredirect(True)
+        self.win.attributes('-topmost', True)
+        self.win.attributes('-alpha', 0.75)
+        r = region
+        self.win.geometry(f'{r["width"]}x{r["height"]}+{r["left"]}+{r["top"]}')
+        self.win.configure(bg='black')
+
+        self.lbl = tk.Label(self.win, text='3', bg='black', fg='red',
+                             font=('Consolas', min(r['height']//2, 200), 'bold'))
+        self.lbl.place(relx=0.5, rely=0.5, anchor='center')
+
+        sub = tk.Label(self.win, text='녹화 시작까지...', bg='black', fg='white',
+                        font=('맑은 고딕', 14))
+        sub.place(relx=0.5, rely=0.72, anchor='center')
+
+        self._tick()
+
+    def _tick(self):
+        if self.count > 0:
+            self.lbl.config(text=str(self.count))
+            self.count -= 1
+            self.win.after(1000, self._tick)
+        else:
+            self.win.destroy()
+            self.on_done()
+
+
+# ──────────────────────────────────────────────────────────────
+# 녹화 중 플로팅 컨트롤 바
 # ──────────────────────────────────────────────────────────────
 class FloatingControls:
-    def __init__(self, region: dict, on_pause, on_stop):
+    def __init__(self, region: dict, on_stop):
         self.region = region
         self.paused = False
 
@@ -75,74 +136,70 @@ class FloatingControls:
         self.win.attributes('-topmost', True)
         self.win.configure(bg='#1a1a1a')
 
-        # 위치: 녹화 영역 상단 중앙
-        bw = 220
-        bh = 36
+        bw, bh = 340, 56
         cx = region['left'] + region['width'] // 2 - bw // 2
-        cy = region['top'] - bh - 6
+        cy = region['top'] - bh - 8
         if cy < 0:
-            cy = region['top'] + 6  # 공간 없으면 안쪽으로
+            cy = region['top'] + 8
         self.win.geometry(f'{bw}x{bh}+{cx}+{cy}')
 
-        # 둥근 느낌을 위한 프레임
         frame = tk.Frame(self.win, bg='#1a1a1a')
-        frame.pack(fill='both', expand=True)
+        frame.pack(fill='both', expand=True, padx=6, pady=6)
 
-        # REC 표시
         self.rec_lbl = tk.Label(frame, text='⏺ REC', bg='#1a1a1a', fg='red',
-                                 font=('Consolas', 9, 'bold'))
-        self.rec_lbl.pack(side='left', padx=8)
+                                 font=('Consolas', 14, 'bold'))
+        self.rec_lbl.pack(side='left', padx=10)
 
-        # 일시정지 버튼
-        self.btn_pause = tk.Button(frame, text='⏸', command=self._toggle_pause,
-                                    bg='#333', fg='white', relief='flat',
-                                    font=('Consolas', 11), padx=6, cursor='hand2', bd=0)
-        self.btn_pause.pack(side='left', padx=2, pady=3)
+        self.btn_pause = tk.Button(frame, text='⏸ 일시정지', command=self._toggle_pause,
+                                    bg='#444', fg='white', relief='flat',
+                                    font=('맑은 고딕', 11, 'bold'), padx=10, pady=6,
+                                    cursor='hand2', bd=0)
+        self.btn_pause.pack(side='left', padx=4)
 
-        # 중지 버튼
         tk.Button(frame, text='⏹ 중지', command=on_stop,
                   bg='#FF4E6A', fg='white', relief='flat',
-                  font=('맑은 고딕', 9, 'bold'), padx=8, cursor='hand2', bd=0).pack(side='left', padx=4, pady=3)
+                  font=('맑은 고딕', 11, 'bold'), padx=14, pady=6,
+                  cursor='hand2', bd=0
+                  ).pack(side='left', padx=4)
 
-        # 드래그 이동 가능하게
-        frame.bind('<ButtonPress-1>', self._drag_start)
-        frame.bind('<B1-Motion>', self._drag_move)
-        self.rec_lbl.bind('<ButtonPress-1>', self._drag_start)
-        self.rec_lbl.bind('<B1-Motion>', self._drag_move)
+        # 드래그
+        for w in (frame, self.rec_lbl):
+            w.bind('<ButtonPress-1>', self._drag_start)
+            w.bind('<B1-Motion>',     self._drag_move)
         self._dx = self._dy = 0
 
-        # REC 깜빡임
-        self._blink_on = True
-        self._blink()
-
-        # 테두리 창들
+        # 테두리
         self._borders = []
         self._create_border()
+
+        # 깜빡임
+        self._blink_on = True
+        self._blink()
 
     def _create_border(self):
         r = self.region
         b = 3
         sides = [
-            (r['left']-b,          r['top']-b,           r['width']+b*2, b),
-            (r['left']-b,          r['top']+r['height'],  r['width']+b*2, b),
-            (r['left']-b,          r['top'],              b, r['height']),
-            (r['left']+r['width'], r['top'],              b, r['height']),
+            (r['left']-b,           r['top']-b,          r['width']+b*2, b),
+            (r['left']-b,           r['top']+r['height'], r['width']+b*2, b),
+            (r['left']-b,           r['top'],             b, r['height']),
+            (r['left']+r['width'],  r['top'],             b, r['height']),
         ]
         for x, y, w, h in sides:
-            win = tk.Toplevel()
-            win.overrideredirect(True)
-            win.attributes('-topmost', True)
-            win.geometry(f'{max(w,1)}x{max(h,1)}+{x}+{y}')
-            win.configure(bg='red')
-            self._borders.append(win)
+            bw = tk.Toplevel()
+            bw.overrideredirect(True)
+            bw.attributes('-topmost', True)
+            bw.geometry(f'{max(w,1)}x{max(h,1)}+{x}+{y}')
+            bw.configure(bg='red')
+            self._borders.append(bw)
 
     def _blink(self):
         self._blink_on = not self._blink_on
-        color = 'red' if self._blink_on else '#660000'
+        c = 'red' if self._blink_on else '#660000'
         try:
-            self.rec_lbl.config(fg=color)
+            self.rec_lbl.config(fg=c)
             for b in self._borders:
-                b.configure(bg=color)
+                b.configure(bg=c)
             self.win.after(500, self._blink)
         except Exception:
             pass
@@ -150,15 +207,14 @@ class FloatingControls:
     def _toggle_pause(self):
         self.paused = not self.paused
         if self.paused:
-            self.btn_pause.config(text='▶', bg='#00FFB3', fg='#0e0e14')
+            self.btn_pause.config(text='▶ 재개', bg='#00FFB3', fg='#0e0e14')
             self.rec_lbl.config(text='⏸ 일시중지', fg='#aaa')
         else:
-            self.btn_pause.config(text='⏸', bg='#333', fg='white')
+            self.btn_pause.config(text='⏸ 일시정지', bg='#444', fg='white')
             self.rec_lbl.config(text='⏺ REC', fg='red')
 
     def _drag_start(self, e):
-        self._dx = e.x
-        self._dy = e.y
+        self._dx, self._dy = e.x, e.y
 
     def _drag_move(self, e):
         x = self.win.winfo_x() + e.x - self._dx
@@ -179,12 +235,12 @@ class FloatingControls:
 # ──────────────────────────────────────────────────────────────
 class Recorder:
     def __init__(self, region: dict, fps: int, on_frame, get_paused):
-        self.region = region
-        self.fps = fps
-        self.on_frame = on_frame
+        self.region     = region
+        self.fps        = fps
+        self.on_frame   = on_frame
         self.get_paused = get_paused
-        self.running = False
-        self._thread = None
+        self.running    = False
+        self._thread    = None
 
     def start(self):
         self.running = True
@@ -217,17 +273,17 @@ class Recorder:
 class App:
     THUMB_W = 160
     THUMB_H = 100
-    COLS    = 3   # 썸네일 3열 (오른쪽에 미리보기 패널 공간 확보)
+    COLS    = 3
 
-    BG    = '#0e0e14'
-    PANEL = '#18181f'
-    CARD  = '#1f1f29'
-    ACCENT= '#00FFB3'
-    RED   = '#FF4E6A'
-    TEXT  = '#e4e4f0'
-    MUTED = '#5a5a72'
-    SEL   = '#00FFB3'
-    DESEL = '#2e2e3e'
+    BG      = '#0e0e14'
+    PANEL   = '#18181f'
+    CARD    = '#1f1f29'
+    ACCENT  = '#00FFB3'
+    RED     = '#FF4E6A'
+    TEXT    = '#e4e4f0'
+    MUTED   = '#5a5a72'
+    SEL     = '#00FFB3'
+    DESEL   = '#2e2e3e'
     PREV_BG = '#13131e'
 
     def __init__(self):
@@ -237,22 +293,24 @@ class App:
         self.root.minsize(800, 500)
         self.root.configure(bg=self.BG)
 
-        self.recorder: Recorder | None          = None
+        self.recorder:   Recorder | None         = None
         self.float_ctrl: FloatingControls | None = None
-        self.region: dict | None                = None
-        self.fps_var   = tk.IntVar(value=5)
-        self.frames: list                       = []
-        self.selected: set                      = set()
-        self._refs                              = []
-        self._cells: list                       = []
-        self._preview_ref                       = None
-        self._current_preview_idx               = -1
+        self.region:     dict | None             = None
+        self.fps_var     = tk.IntVar(value=5)
+        self.delay_var   = tk.BooleanVar(value=True)   # 3초 딜레이 ON/OFF
+        self.frames: list         = []
+        self.selected: set        = set()
+        self._refs                = []
+        self._cells: list         = []
+        self._preview_ref         = None
+        self._current_preview_idx = -1
 
         self._build()
 
         if not MSS_AVAILABLE:
             messagebox.showerror('패키지 누락', 'pip install mss 후 다시 실행하세요.')
 
+    # ── 공통 버튼 헬퍼
     def _btn(self, parent, text, cmd, bg=None, fg=None, state='normal', **kw):
         return tk.Button(parent, text=text, command=cmd,
                          bg=bg or self.CARD, fg=fg or self.TEXT,
@@ -270,6 +328,7 @@ class App:
         tk.Label(bar, text='⬛ FrameSnap', bg=self.PANEL, fg=self.ACCENT,
                  font=('Consolas', 15, 'bold')).pack(side='left', padx=18)
 
+        # FPS
         fps_f = tk.Frame(bar, bg=self.PANEL)
         fps_f.pack(side='left', padx=8)
         tk.Label(fps_f, text='FPS', bg=self.PANEL, fg=self.MUTED,
@@ -279,6 +338,15 @@ class App:
                    relief='flat', font=('Consolas', 12), justify='center',
                    buttonbackground='#252530').pack(side='left', padx=6)
 
+        # 3초 딜레이 체크박스
+        delay_f = tk.Frame(bar, bg=self.PANEL)
+        delay_f.pack(side='left', padx=12)
+        tk.Checkbutton(delay_f, text='3초 후 시작', variable=self.delay_var,
+                       bg=self.PANEL, fg=self.TEXT, selectcolor='#252530',
+                       activebackground=self.PANEL, activeforeground=self.TEXT,
+                       font=('맑은 고딕', 9), cursor='hand2').pack(side='left')
+
+        # 버튼
         self.btn_start = self._btn(bar, '⏺  영역 선택 후 녹화', self.start_recording,
                                     bg=self.ACCENT, fg=self.BG)
         self.btn_start.pack(side='right', padx=14, pady=10)
@@ -295,11 +363,11 @@ class App:
         tk.Label(sbar, textvariable=self.cnt_var, bg='#111118', fg=self.ACCENT,
                  font=('Consolas', 8, 'bold')).pack(side='right', padx=12)
 
-        # ── 메인 영역: 좌(썸네일) + 우(미리보기)
+        # ── 메인 (좌: 썸네일 / 우: 미리보기)
         main = tk.Frame(self.root, bg=self.BG)
         main.pack(fill='both', expand=True)
 
-        # 좌측 썸네일 패널
+        # 좌측 썸네일
         left = tk.Frame(main, bg=self.BG, width=420)
         left.pack(side='left', fill='both')
         left.pack_propagate(False)
@@ -320,11 +388,10 @@ class App:
                                    bg=self.BG, fg=self.MUTED, font=('맑은 고딕', 11))
         self.empty_lbl.grid(row=0, column=0, columnspan=self.COLS, pady=60)
 
-        # 우측 미리보기 패널
+        # 우측 미리보기
         right = tk.Frame(main, bg=self.PREV_BG)
         right.pack(side='left', fill='both', expand=True)
 
-        # 미리보기 상단 타이틀
         prev_top = tk.Frame(right, bg='#1a1a28', height=36)
         prev_top.pack(fill='x')
         prev_top.pack_propagate(False)
@@ -334,7 +401,6 @@ class App:
                                     font=('Consolas', 9, 'bold'))
         self.prev_title.pack(side='left')
 
-        # 좌우 이동 버튼
         nav_f = tk.Frame(prev_top, bg='#1a1a28')
         nav_f.pack(side='right', padx=8)
         tk.Button(nav_f, text='◀', command=lambda: self._prev_nav(-1),
@@ -344,17 +410,14 @@ class App:
                   bg='#2e2e3e', fg='white', relief='flat', font=('Consolas', 10),
                   padx=8, pady=2, cursor='hand2', bd=0).pack(side='left', padx=2)
 
-        # 미리보기 이미지
         self.prev_canvas = tk.Canvas(right, bg=self.PREV_BG, highlightthickness=0)
         self.prev_canvas.pack(fill='both', expand=True, padx=10, pady=10)
 
-        # 안내 텍스트
         self.prev_hint = tk.Label(right,
                                    text='썸네일을 클릭하면\n여기에 크게 표시됩니다.\n\n← → 키로 이동',
                                    bg=self.PREV_BG, fg=self.MUTED, font=('맑은 고딕', 11))
         self.prev_hint.place(relx=0.5, rely=0.5, anchor='center')
 
-        # 키보드 바인딩
         self.root.bind('<Left>',  lambda e: self._prev_nav(-1))
         self.root.bind('<Right>', lambda e: self._prev_nav(1))
 
@@ -370,13 +433,13 @@ class App:
         self._btn(bot, '💾  선택한 프레임 PNG 저장', self.save_selected,
                   bg=self.ACCENT, fg=self.BG).pack(side='right', padx=16, pady=8)
 
-    # ── 녹화
+    # ── 녹화 흐름
     def start_recording(self):
         if not MSS_AVAILABLE:
             messagebox.showerror('오류', 'pip install mss 후 재실행하세요.')
             return
         self.root.iconify()
-        time.sleep(0.35)
+        time.sleep(0.3)
         RegionSelector(self._on_region)
 
     def _on_region(self, region):
@@ -384,13 +447,20 @@ class App:
         if region is None:
             return
         self.region = region
-
-        # 플로팅 컨트롤 바 생성
-        self.float_ctrl = FloatingControls(region, None, self.stop_recording)
-
-        self.recorder = Recorder(region, self.fps_var.get(), self._on_frame,
-                                  lambda: self.float_ctrl.paused if self.float_ctrl else False)
         self.btn_start.config(state='disabled')
+
+        if self.delay_var.get():
+            # 3초 카운트다운 후 시작
+            self.status_var.set('3초 후 녹화 시작...')
+            Countdown(region, self._begin_recording)
+        else:
+            self._begin_recording()
+
+    def _begin_recording(self):
+        region = self.region
+        self.float_ctrl = FloatingControls(region, self.stop_recording)
+        self.recorder   = Recorder(region, self.fps_var.get(), self._on_frame,
+                                    lambda: self.float_ctrl.paused if self.float_ctrl else False)
         self.status_var.set(f'🔴 녹화 중  –  {region["width"]}×{region["height"]}  |  {self.fps_var.get()} FPS')
         self.recorder.start()
 
@@ -434,12 +504,10 @@ class App:
         for w in (cell, il, nl):
             w.bind('<Button-1>', lambda e, i=idx: self._click_frame(i))
 
-        # 최신 프레임 자동 미리보기
         self._show_preview(idx)
         self.cnt_var.set(f'프레임 {len(self.frames)}')
 
     def _click_frame(self, idx):
-        """단클릭: 선택/해제 + 미리보기"""
         if idx in self.selected:
             self.selected.discard(idx)
             self._cells[idx].config(highlightbackground=self.DESEL)
@@ -454,16 +522,13 @@ class App:
         if idx < 0 or idx >= len(self.frames):
             return
         self._current_preview_idx = idx
-
-        # 안내 텍스트 숨기기
         self.prev_hint.place_forget()
 
         rgb = self.frames[idx]
         img = Image.fromarray(rgb)
 
-        # 캔버스 크기에 맞게 리사이즈
         self.prev_canvas.update_idletasks()
-        cw = self.prev_canvas.winfo_width() - 20
+        cw = self.prev_canvas.winfo_width()  - 20
         ch = self.prev_canvas.winfo_height() - 20
         if cw < 50 or ch < 50:
             cw, ch = 500, 550
