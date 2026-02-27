@@ -287,8 +287,10 @@ class PlayerWindow:
         bar_f.pack(fill='x', padx=8, pady=4)
 
         self.progress = ttk.Scale(bar_f, from_=0, to=max(len(self.frames)-1, 1),
-                                   orient='horizontal', command=self._on_seek)
+                                   orient='horizontal')
         self.progress.pack(fill='x')
+        self.progress.bind('<ButtonRelease-1>', self._on_seek)
+        self.progress.bind('<B1-Motion>',       self._on_seek)
 
         # 프레임 번호 + 스크린샷 카운트
         info_f = tk.Frame(self.win, bg=BG)
@@ -409,9 +411,12 @@ class PlayerWindow:
         self.idx = max(0, min(idx, len(self.frames)-1))
         self._show_frame()
 
-    def _on_seek(self, val):
-        self.idx = int(float(val))
-        self._show_frame()
+    def _on_seek(self, event=None):
+        try:
+            self.idx = int(self.progress.get())
+            self._show_frame()
+        except Exception:
+            pass
 
     def _set_speed(self, spd):
         self.speed = spd
