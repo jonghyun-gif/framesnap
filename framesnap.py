@@ -355,6 +355,7 @@ class FramePickerWindow:
 
         self.prev_canvas = tk.Canvas(right, bg=self.PREV_BG, highlightthickness=0)
         self.prev_canvas.pack(fill='both', expand=True, padx=10, pady=10)
+        self.prev_canvas.bind('<Configure>', lambda e: self._show_preview(self._cur_idx))
 
         self.prev_hint = tk.Label(right,
                                    text='썸네일을 클릭하면\n여기에 크게 표시됩니다.\n\n← → 키로 이동',
@@ -452,14 +453,17 @@ class FramePickerWindow:
         rgb = self.frames[idx]
         img = Image.fromarray(rgb)
         self.prev_canvas.update_idletasks()
-        cw = max(self.prev_canvas.winfo_width()-20, 100)
-        ch = max(self.prev_canvas.winfo_height()-20, 100)
+        cw = max(self.prev_canvas.winfo_width() - 20, 100)
+        ch = max(self.prev_canvas.winfo_height() - 20, 100)
         iw, ih = img.size
-        scale = min(cw/iw, ch/ih, 1.0)
-        img = img.resize((max(int(iw*scale),1), max(int(ih*scale),1)), Image.LANCZOS)
+        # 창 크기에 맞게 확대/축소 모두 허용
+        scale = min(cw / iw, ch / ih)
+        nw = max(int(iw * scale), 1)
+        nh = max(int(ih * scale), 1)
+        img = img.resize((nw, nh), Image.LANCZOS)
         self._preview_ref = ImageTk.PhotoImage(img)
         self.prev_canvas.delete('all')
-        self.prev_canvas.create_image(cw//2+10, ch//2+10, image=self._preview_ref, anchor='center')
+        self.prev_canvas.create_image(cw // 2 + 10, ch // 2 + 10, image=self._preview_ref, anchor='center')
         self.prev_title.config(text=f'#{idx+1} / {len(self.frames)}')
         self.btn_bm.config(fg=self.GOLD if idx in self.bookmarks else self.MUTED)
 
@@ -519,8 +523,8 @@ class App:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title('FrameSnap')
-        self.root.geometry('960x680')
-        self.root.minsize(700, 480)
+        self.root.geometry('1280x820')
+        self.root.minsize(800, 560)
         self.root.configure(bg=self.BG)
 
         self.recorder:   Recorder | None         = None
@@ -593,9 +597,10 @@ class App:
         tk.Label(sbar, textvariable=self.cnt_var, bg='#111118', fg=self.ACCENT,
                  font=('Consolas', 8, 'bold')).pack(side='right', padx=12)
 
-        # ── 영상 캔버스 (메인)
+        # ── 영상 캔버스 (메인) - 창 크기 변경 시 자동 리드로우
         self.canvas = tk.Canvas(self.root, bg='#080810', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True, padx=8, pady=(6,0))
+        self.canvas.bind('<Configure>', self._on_canvas_resize)
 
         # ── 진행바
         bar_f = tk.Frame(self.root, bg=self.BG)
@@ -698,6 +703,13 @@ class App:
                                  text='⏺ 녹화 버튼으로 시작하세요',
                                  fill=self.MUTED, font=('맑은 고딕', 14))
 
+    def _on_canvas_resize(self, event=None):
+        """창 크기 변경 시 현재 프레임 다시 그리기"""
+        if self.frames:
+            self._show_frame()
+        else:
+            self._draw_empty()
+
     # ── 재생
     def _show_frame(self):
         if not self.frames: return
@@ -708,11 +720,14 @@ class App:
         cw = max(self.canvas.winfo_width(), 10)
         ch = max(self.canvas.winfo_height(), 10)
         iw, ih = img.size
-        scale = min(cw/iw, ch/ih, 1.0)
-        img = img.resize((max(int(iw*scale),1), max(int(ih*scale),1)), Image.LANCZOS)
+        # 1.0 제한 제거 → 창 크기에 맞게 확대/축소 모두 허용
+        scale = min(cw / iw, ch / ih)
+        nw = max(int(iw * scale), 1)
+        nh = max(int(ih * scale), 1)
+        img = img.resize((nw, nh), Image.LANCZOS)
         self._ref = ImageTk.PhotoImage(img)
         self.canvas.delete('all')
-        self.canvas.create_image(cw//2, ch//2, image=self._ref, anchor='center')
+        self.canvas.create_image(cw // 2, ch // 2, image=self._ref, anchor='center')
         try: self.progress.set(self.idx)
         except: pass
         self.frame_lbl.config(
