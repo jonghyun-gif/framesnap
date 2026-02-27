@@ -112,8 +112,7 @@ class FloatingControls:
         bw, bh = 340, 56
         cx = region['left'] + region['width'] // 2 - bw // 2
         cy = region['top'] - bh - 8
-        if cy < 0:
-            cy = region['top'] + 8
+        if cy < 0: cy = region['top'] + 8
         self.win.geometry(f'{bw}x{bh}+{cx}+{cy}')
         frame = tk.Frame(self.win, bg='#1a1a1a')
         frame.pack(fill='both', expand=True, padx=6, pady=6)
@@ -215,6 +214,241 @@ class Recorder:
 
 
 # ──────────────────────────────────────────────────────────────
+# 영상 재생 플레이어 (별도 팝업창)
+# ──────────────────────────────────────────────────────────────
+class PlayerWindow:
+    def __init__(self, parent, frames: list, auto_save_folder_var, on_screenshot):
+        self.frames           = frames
+        self.auto_folder_var  = auto_save_folder_var   # StringVar (저장 폴더 경로)
+        self.on_screenshot    = on_screenshot           # 스크린샷 저장 콜백
+        self.idx              = 0
+        self.playing          = False
+        self.speed            = 1.0                     # 재생 속도 배율
+        self._ref             = None
+        self._after_id        = None
+        self.screenshot_count = 0
+
+        self.win = tk.Toplevel(parent)
+        self.win.title('▶ 영상 재생')
+        self.win.configure(bg='#0e0e14')
+        self.win.protocol('WM_DELETE_WINDOW', self._close)
+        self.win.geometry('820x680')
+        self.win.minsize(600, 500)
+
+        # 키 바인딩
+        self.win.bind('<space>',      lambda e: self._toggle_play())
+        self.win.bind('<Left>',       lambda e: self._step(-1))
+        self.win.bind('<Right>',      lambda e: self._step(1))
+        self.win.bind('<s>',          lambda e: self._take_screenshot())
+        self.win.bind('<S>',          lambda e: self._take_screenshot())
+
+        self._build()
+        self._show_frame()
+        self.win.focus_force()
+
+    def _build(self):
+        BG    = '#0e0e14'
+        PANEL = '#18181f'
+        ACC   = '#00FFB3'
+        RED   = '#FF4E6A'
+        MUTED = '#5a5a72'
+        TEXT  = '#e4e4f0'
+        GOLD  = '#FFD700'
+
+        # 상단: 타이틀 + 저장 폴더 설정
+        top = tk.Frame(self.win, bg=PANEL, height=44)
+        top.pack(fill='x')
+        top.pack_propagate(False)
+
+        tk.Label(top, text='▶ 재생 모드', bg=PANEL, fg=ACC,
+                 font=('Consolas', 11, 'bold')).pack(side='left', padx=14, pady=10)
+
+        # 자동 저장 폴더 표시 + 변경 버튼
+        folder_f = tk.Frame(top, bg=PANEL)
+        folder_f.pack(side='right', padx=10, pady=8)
+        tk.Label(folder_f, text='저장 폴더:', bg=PANEL, fg=MUTED,
+                 font=('맑은 고딕', 8)).pack(side='left')
+        self.folder_lbl = tk.Label(folder_f,
+                                    textvariable=self.auto_folder_var,
+                                    bg=PANEL, fg=TEXT, font=('Consolas', 8),
+                                    width=28, anchor='w')
+        self.folder_lbl.pack(side='left', padx=4)
+        tk.Button(folder_f, text='📁 변경', command=self._change_folder,
+                  bg='#2a2a38', fg=TEXT, relief='flat',
+                  font=('맑은 고딕', 8, 'bold'), padx=8, pady=2,
+                  cursor='hand2', bd=0).pack(side='left', padx=2)
+
+        # 영상 캔버스
+        self.canvas = tk.Canvas(self.win, bg='#080810', highlightthickness=0)
+        self.canvas.pack(fill='both', expand=True, padx=8, pady=(4,0))
+
+        # 진행바
+        bar_f = tk.Frame(self.win, bg=BG)
+        bar_f.pack(fill='x', padx=8, pady=4)
+
+        self.progress = ttk.Scale(bar_f, from_=0, to=max(len(self.frames)-1, 1),
+                                   orient='horizontal', command=self._on_seek)
+        self.progress.pack(fill='x')
+
+        # 프레임 번호 + 스크린샷 카운트
+        info_f = tk.Frame(self.win, bg=BG)
+        info_f.pack(fill='x', padx=10)
+        self.frame_lbl = tk.Label(info_f, text='', bg=BG, fg=MUTED,
+                                   font=('Consolas', 9))
+        self.frame_lbl.pack(side='left')
+        self.shot_lbl = tk.Label(info_f, text='저장된 스크린샷: 0장', bg=BG, fg=GOLD,
+                                  font=('Consolas', 9, 'bold'))
+        self.shot_lbl.pack(side='right')
+
+        # 컨트롤 버튼 행
+        ctrl = tk.Frame(self.win, bg=PANEL, height=60)
+        ctrl.pack(fill='x', pady=(4,0))
+        ctrl.pack_propagate(False)
+
+        # 재생 속도
+        speed_f = tk.Frame(ctrl, bg=PANEL)
+        speed_f.pack(side='left', padx=12, pady=10)
+        tk.Label(speed_f, text='속도', bg=PANEL, fg=MUTED,
+                 font=('맑은 고딕', 8)).pack(side='left')
+        for spd, label in [(0.25,'0.25x'), (0.5,'0.5x'), (1.0,'1x'), (2.0,'2x'), (4.0,'4x')]:
+            b = tk.Button(speed_f, text=label,
+                          command=lambda s=spd: self._set_speed(s),
+                          bg='#2a2a38', fg=TEXT, relief='flat',
+                          font=('Consolas', 8, 'bold'), padx=6, pady=4,
+                          cursor='hand2', bd=0)
+            b.pack(side='left', padx=2)
+
+        # 재생 컨트롤
+        play_f = tk.Frame(ctrl, bg=PANEL)
+        play_f.pack(side='left', padx=20, pady=8)
+
+        tk.Button(play_f, text='⏮', command=lambda: self._jump(0),
+                  bg='#2a2a38', fg=TEXT, relief='flat', font=('Consolas', 13),
+                  padx=8, pady=4, cursor='hand2', bd=0).pack(side='left', padx=2)
+        tk.Button(play_f, text='◀◀', command=lambda: self._step(-10),
+                  bg='#2a2a38', fg=TEXT, relief='flat', font=('Consolas', 11),
+                  padx=8, pady=4, cursor='hand2', bd=0).pack(side='left', padx=2)
+        tk.Button(play_f, text='◀', command=lambda: self._step(-1),
+                  bg='#2a2a38', fg=TEXT, relief='flat', font=('Consolas', 13),
+                  padx=8, pady=4, cursor='hand2', bd=0).pack(side='left', padx=2)
+
+        self.btn_play = tk.Button(play_f, text='▶ 재생',
+                                   command=self._toggle_play,
+                                   bg=ACC, fg='#0e0e14', relief='flat',
+                                   font=('맑은 고딕', 11, 'bold'), padx=16, pady=6,
+                                   cursor='hand2', bd=0)
+        self.btn_play.pack(side='left', padx=6)
+
+        tk.Button(play_f, text='▶', command=lambda: self._step(1),
+                  bg='#2a2a38', fg=TEXT, relief='flat', font=('Consolas', 13),
+                  padx=8, pady=4, cursor='hand2', bd=0).pack(side='left', padx=2)
+        tk.Button(play_f, text='▶▶', command=lambda: self._step(10),
+                  bg='#2a2a38', fg=TEXT, relief='flat', font=('Consolas', 11),
+                  padx=8, pady=4, cursor='hand2', bd=0).pack(side='left', padx=2)
+        tk.Button(play_f, text='⏭', command=lambda: self._jump(len(self.frames)-1),
+                  bg='#2a2a38', fg=TEXT, relief='flat', font=('Consolas', 13),
+                  padx=8, pady=4, cursor='hand2', bd=0).pack(side='left', padx=2)
+
+        # 📸 스크린샷 버튼 (크고 눈에 띄게)
+        tk.Button(ctrl, text='📸  스크린샷  [S]',
+                  command=self._take_screenshot,
+                  bg=RED, fg='white', relief='flat',
+                  font=('맑은 고딕', 12, 'bold'), padx=20, pady=10,
+                  cursor='hand2', bd=0).pack(side='right', padx=16, pady=8)
+
+    # ── 재생 로직
+    def _show_frame(self):
+        if not self.frames: return
+        self.idx = max(0, min(self.idx, len(self.frames)-1))
+        rgb = self.frames[self.idx]
+        img = Image.fromarray(rgb)
+
+        self.canvas.update_idletasks()
+        cw = max(self.canvas.winfo_width(),  10)
+        ch = max(self.canvas.winfo_height(), 10)
+        iw, ih = img.size
+        scale = min(cw/iw, ch/ih, 1.0)
+        img = img.resize((max(int(iw*scale),1), max(int(ih*scale),1)), Image.LANCZOS)
+        self._ref = ImageTk.PhotoImage(img)
+        self.canvas.delete('all')
+        self.canvas.create_image(cw//2, ch//2, image=self._ref, anchor='center')
+
+        self.progress.set(self.idx)
+        self.frame_lbl.config(text=f'프레임 #{self.idx+1} / {len(self.frames)}   |   Space: 재생/정지   ←→: 한 프레임   S: 스크린샷')
+
+    def _toggle_play(self):
+        self.playing = not self.playing
+        if self.playing:
+            self.btn_play.config(text='⏸ 일시정지', bg='#FF4E6A', fg='white')
+            self._play_loop()
+        else:
+            self.btn_play.config(text='▶ 재생', bg='#00FFB3', fg='#0e0e14')
+            if self._after_id:
+                try: self.win.after_cancel(self._after_id)
+                except: pass
+
+    def _play_loop(self):
+        if not self.playing: return
+        if self.idx >= len(self.frames) - 1:
+            self.idx = len(self.frames) - 1
+            self._show_frame()
+            self._toggle_play()
+            return
+        self.idx += 1
+        self._show_frame()
+        interval = max(int(1000 / (self.speed * 10)), 16)  # 기본 10fps 기준
+        self._after_id = self.win.after(interval, self._play_loop)
+
+    def _step(self, d):
+        if self.playing: self._toggle_play()
+        self.idx = max(0, min(self.idx + d, len(self.frames)-1))
+        self._show_frame()
+
+    def _jump(self, idx):
+        if self.playing: self._toggle_play()
+        self.idx = max(0, min(idx, len(self.frames)-1))
+        self._show_frame()
+
+    def _on_seek(self, val):
+        self.idx = int(float(val))
+        self._show_frame()
+
+    def _set_speed(self, spd):
+        self.speed = spd
+
+    # ── 스크린샷 저장
+    def _take_screenshot(self):
+        folder = self.auto_folder_var.get()
+        if not folder or not os.path.isdir(folder):
+            folder = filedialog.askdirectory(title='스크린샷 저장 폴더 선택')
+            if not folder: return
+            self.auto_folder_var.set(folder)
+
+        if self.idx >= len(self.frames): return
+        self.screenshot_count += 1
+        path = os.path.join(folder, f'screenshot_{self.screenshot_count:04d}_f{self.idx+1}.png')
+        Image.fromarray(self.frames[self.idx]).save(path)
+
+        # 화면 번쩍 효과
+        self.canvas.configure(bg='white')
+        self.win.after(80, lambda: self.canvas.configure(bg='#080810'))
+
+        self.shot_lbl.config(text=f'저장된 스크린샷: {self.screenshot_count}장')
+        self.on_screenshot(self.idx)   # 메인 앱에도 알림
+
+    def _change_folder(self):
+        folder = filedialog.askdirectory(title='스크린샷 저장 폴더 선택')
+        if folder:
+            self.auto_folder_var.set(folder)
+
+    def _close(self):
+        if self._after_id:
+            try: self.win.after_cancel(self._after_id)
+            except: pass
+        self.win.destroy()
+
+
+# ──────────────────────────────────────────────────────────────
 # 메인 GUI
 # ──────────────────────────────────────────────────────────────
 class App:
@@ -227,7 +461,7 @@ class App:
     CARD    = '#1f1f29'
     ACCENT  = '#00FFB3'
     RED     = '#FF4E6A'
-    GOLD    = '#FFD700'   # 책갈피 색
+    GOLD    = '#FFD700'
     TEXT    = '#e4e4f0'
     MUTED   = '#5a5a72'
     SEL     = '#00FFB3'
@@ -244,24 +478,24 @@ class App:
         self.recorder:   Recorder | None         = None
         self.float_ctrl: FloatingControls | None = None
         self.region:     dict | None             = None
-        self.fps_var     = tk.IntVar(value=5)
-        self.delay_var   = tk.BooleanVar(value=True)
-        self.select_mode = tk.BooleanVar(value=False)  # 선택하기 모드
-        self.interval_var = tk.IntVar(value=5)          # N프레임 간격 선택
+        self.fps_var      = tk.IntVar(value=5)
+        self.delay_var    = tk.BooleanVar(value=True)
+        self.select_mode  = tk.BooleanVar(value=False)
+        self.interval_var = tk.IntVar(value=5)
+        self.auto_folder  = tk.StringVar(value='폴더 미설정')  # 재생 스크린샷 자동 저장 폴더
 
-        self.frames:   list = []
-        self.selected: set  = set()
-        self.bookmarks: set = set()   # 책갈피
-        self._refs          = []
-        self._cells: list   = []      # (cell_frame, bm_label) 튜플
-        self._preview_ref   = None
-        self._cur_idx       = -1
+        self.frames:    list = []
+        self.selected:  set  = set()
+        self.bookmarks: set  = set()
+        self._refs           = []
+        self._cells: list    = []
+        self._preview_ref    = None
+        self._cur_idx        = -1
 
         self._build()
         if not MSS_AVAILABLE:
             messagebox.showerror('패키지 누락', 'pip install mss 후 다시 실행하세요.')
 
-    # ── 공통 버튼
     def _btn(self, parent, text, cmd, bg=None, fg=None, state='normal', **kw):
         return tk.Button(parent, text=text, command=cmd,
                          bg=bg or self.CARD, fg=fg or self.TEXT,
@@ -298,12 +532,15 @@ class App:
         self.btn_start.pack(side='right', padx=14, pady=10)
         self._btn(bar, '🗑  초기화', self.clear_all).pack(side='right', padx=4, pady=10)
 
-        # ── 툴바 (선택 도구)
+        # ▶ 재생 버튼
+        self._btn(bar, '▶  영상 재생', self._open_player,
+                  bg='#2a2a50').pack(side='right', padx=4, pady=10)
+
+        # ── 툴바
         tools = tk.Frame(self.root, bg='#13131a', height=40)
         tools.pack(fill='x')
         tools.pack_propagate(False)
 
-        # 선택하기 토글 버튼
         self.btn_selmode = tk.Button(tools, text='☐ 선택하기',
                                       command=self._toggle_select_mode,
                                       bg='#2a2a38', fg=self.TEXT, relief='flat',
@@ -311,10 +548,8 @@ class App:
                                       cursor='hand2', bd=0)
         self.btn_selmode.pack(side='left', padx=10, pady=6)
 
-        # 구분선
         tk.Frame(tools, bg='#2e2e3e', width=1).pack(side='left', fill='y', pady=6, padx=4)
 
-        # N프레임 간격 선택
         tk.Label(tools, text='N프레임 간격:', bg='#13131a', fg=self.MUTED,
                  font=('맑은 고딕', 9)).pack(side='left', padx=(10,2), pady=6)
         tk.Spinbox(tools, from_=1, to=100, textvariable=self.interval_var, width=4,
@@ -324,27 +559,19 @@ class App:
         self._btn(tools, '적용', self._apply_interval,
                   bg='#3a3a50').pack(side='left', padx=6, pady=6)
 
-        # 구분선
         tk.Frame(tools, bg='#2e2e3e', width=1).pack(side='left', fill='y', pady=6, padx=4)
 
-        # 선택 관련 버튼
-        self._btn(tools, '전체 선택', self.select_all,
-                  bg='#2a2a38').pack(side='left', padx=4, pady=6)
-        self._btn(tools, '선택 해제', self.deselect_all,
-                  bg='#2a2a38').pack(side='left', padx=4, pady=6)
+        self._btn(tools, '전체 선택', self.select_all, bg='#2a2a38').pack(side='left', padx=4, pady=6)
+        self._btn(tools, '선택 해제', self.deselect_all, bg='#2a2a38').pack(side='left', padx=4, pady=6)
 
-        # 구분선
         tk.Frame(tools, bg='#2e2e3e', width=1).pack(side='left', fill='y', pady=6, padx=4)
 
-        # 책갈피 저장 버튼
         self._btn(tools, '🔖 책갈피만 저장', self.save_bookmarks,
                   bg='#3a3010', fg=self.GOLD).pack(side='left', padx=6, pady=6)
 
-        # 선택 저장 버튼 (오른쪽)
         self._btn(tools, '💾 선택 저장', self.save_selected,
                   bg=self.ACCENT, fg=self.BG).pack(side='right', padx=14, pady=6)
 
-        # 선택 상태 표시
         self.sel_var = tk.StringVar(value='선택 모드 OFF  |  선택: 0개  |  책갈피: 0개')
         tk.Label(tools, textvariable=self.sel_var, bg='#13131a', fg=self.MUTED,
                  font=('맑은 고딕', 8)).pack(side='right', padx=10)
@@ -360,11 +587,10 @@ class App:
         tk.Label(sbar, textvariable=self.cnt_var, bg='#111118', fg=self.ACCENT,
                  font=('Consolas', 8, 'bold')).pack(side='right', padx=12)
 
-        # ── 메인 (좌: 썸네일 / 우: 미리보기)
+        # ── 메인
         main = tk.Frame(self.root, bg=self.BG)
         main.pack(fill='both', expand=True)
 
-        # 좌측 썸네일
         left = tk.Frame(main, bg=self.BG, width=430)
         left.pack(side='left', fill='both')
         left.pack_propagate(False)
@@ -385,7 +611,6 @@ class App:
                                    bg=self.BG, fg=self.MUTED, font=('맑은 고딕', 11))
         self.empty_lbl.grid(row=0, column=0, columnspan=self.COLS, pady=60)
 
-        # 우측 미리보기
         right = tk.Frame(main, bg=self.PREV_BG)
         right.pack(side='left', fill='both', expand=True)
 
@@ -397,8 +622,6 @@ class App:
         self.prev_title = tk.Label(prev_top, text='', bg='#1a1a28', fg=self.ACCENT,
                                     font=('Consolas', 9, 'bold'))
         self.prev_title.pack(side='left')
-
-        # 미리보기 내 책갈피 버튼
         self.btn_bm = tk.Button(prev_top, text='🔖', command=self._toggle_bookmark_current,
                                  bg='#1a1a28', fg=self.MUTED, relief='flat',
                                  font=('Consolas', 14), padx=6, cursor='hand2', bd=0)
@@ -424,7 +647,19 @@ class App:
         self.root.bind('<Left>',  lambda e: self._prev_nav(-1))
         self.root.bind('<Right>', lambda e: self._prev_nav(1))
 
-    # ── 선택 모드 토글
+    # ── 재생 플레이어 열기
+    def _open_player(self):
+        if not self.frames:
+            messagebox.showwarning('알림', '먼저 녹화를 진행하세요.')
+            return
+        PlayerWindow(self.root, self.frames, self.auto_folder,
+                     self._on_player_screenshot)
+
+    def _on_player_screenshot(self, frame_idx):
+        """플레이어에서 스크린샷 찍었을 때 메인 상태바 업데이트"""
+        self.status_var.set(f'📸 스크린샷 저장됨  –  프레임 #{frame_idx+1}  →  {self.auto_folder.get()}')
+
+    # ── 선택 모드
     def _toggle_select_mode(self):
         self.select_mode.set(not self.select_mode.get())
         if self.select_mode.get():
@@ -438,29 +673,21 @@ class App:
         if not self.frames:
             messagebox.showwarning('알림', '먼저 녹화를 진행하세요.')
             return
-        n = self.interval_var.get()
-        if n < 1: n = 1
+        n = max(1, self.interval_var.get())
         total = len(self.frames)
-        # 기존 선택 초기화
         self.selected.clear()
-        for c, _ in self._cells:
-            c.config(highlightbackground=self.DESEL)
-        # N 간격으로 선택 (0-based: 0, n-1, 2n-1 ... + 마지막)
+        for c, _ in self._cells: c.config(highlightbackground=self.DESEL)
         targets = set(range(0, total, n))
-        targets.add(total - 1)  # 마지막 프레임 무조건 포함
+        targets.add(total - 1)
         for i in targets:
             self.selected.add(i)
             if i < len(self._cells):
                 self._cells[i][0].config(highlightbackground=self.SEL)
         self._update_status()
-        messagebox.showinfo('간격 선택',
-                            f'{n}프레임 간격으로 {len(targets)}개 선택됨\n(마지막 프레임 #{total} 포함)')
+        messagebox.showinfo('간격 선택', f'{n}프레임 간격으로 {len(targets)}개 선택됨\n(마지막 프레임 #{total} 포함)')
 
-    # ── 썸네일 클릭
     def _click_frame(self, idx):
-        # 항상 미리보기
         self._show_preview(idx)
-        # 선택 모드일 때만 선택/해제
         if self.select_mode.get():
             if idx in self.selected:
                 self.selected.discard(idx)
@@ -470,31 +697,22 @@ class App:
                 self._cells[idx][0].config(highlightbackground=self.SEL)
             self._update_status()
 
-    # ── 책갈피 토글 (미리보기 패널 버튼)
     def _toggle_bookmark_current(self):
         idx = self._cur_idx
-        if idx < 0 or idx >= len(self.frames):
-            return
+        if idx < 0 or idx >= len(self.frames): return
         self._toggle_bookmark(idx)
 
     def _toggle_bookmark(self, idx):
         if idx in self.bookmarks:
             self.bookmarks.discard(idx)
-            # 썸네일 책갈피 아이콘 제거
-            if idx < len(self._cells):
-                self._cells[idx][1].config(text='')
-            # 미리보기 버튼 색 업데이트
-            if idx == self._cur_idx:
-                self.btn_bm.config(fg=self.MUTED)
+            if idx < len(self._cells): self._cells[idx][1].config(text='')
+            if idx == self._cur_idx: self.btn_bm.config(fg=self.MUTED)
         else:
             self.bookmarks.add(idx)
-            if idx < len(self._cells):
-                self._cells[idx][1].config(text='🔖', fg=self.GOLD)
-            if idx == self._cur_idx:
-                self.btn_bm.config(fg=self.GOLD)
+            if idx < len(self._cells): self._cells[idx][1].config(text='🔖', fg=self.GOLD)
+            if idx == self._cur_idx: self.btn_bm.config(fg=self.GOLD)
         self._update_status()
 
-    # ── 상태 표시 업데이트
     def _update_status(self):
         mode = '선택 모드 ON ' if self.select_mode.get() else '선택 모드 OFF'
         self.sel_var.set(f'{mode}  |  선택: {len(self.selected)}개  |  책갈피: {len(self.bookmarks)}개')
@@ -541,56 +759,41 @@ class App:
         self.frames.append(rgb)
         self.root.after(0, self._add_thumb, rgb, idx)
 
-    # ── 썸네일 추가
     def _add_thumb(self, rgb, idx):
         if self.empty_lbl.winfo_ismapped():
             self.empty_lbl.grid_forget()
-
         img = Image.fromarray(rgb)
         img.thumbnail((self.THUMB_W, self.THUMB_H), Image.LANCZOS)
         photo = ImageTk.PhotoImage(img)
         self._refs.append(photo)
-
         row, col = divmod(idx, self.COLS)
         cell = tk.Frame(self.gf, bg=self.CARD,
                          highlightthickness=2, highlightbackground=self.DESEL,
                          cursor='hand2')
         cell.grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
-
         il = tk.Label(cell, image=photo, bg=self.CARD)
         il.pack()
-
-        # 하단 행: 번호 + 책갈피 아이콘
         bot = tk.Frame(cell, bg=self.CARD)
         bot.pack(fill='x', pady=2)
         tk.Label(bot, text=f'#{idx+1}', bg=self.CARD, fg=self.MUTED,
                   font=('Consolas', 8)).pack(side='left', padx=6)
-        bm_lbl = tk.Label(bot, text='', bg=self.CARD, fg=self.GOLD,
-                           font=('Consolas', 9))
+        bm_lbl = tk.Label(bot, text='', bg=self.CARD, fg=self.GOLD, font=('Consolas', 9))
         bm_lbl.pack(side='right', padx=4)
-
         self._cells.append((cell, bm_lbl))
-
         for w in (cell, il, bot, bm_lbl):
             w.bind('<Button-1>', lambda e, i=idx: self._click_frame(i))
-
         self._show_preview(idx)
         self.cnt_var.set(f'프레임 {len(self.frames)}')
 
-    # ── 우측 미리보기
     def _show_preview(self, idx):
         if idx < 0 or idx >= len(self.frames): return
         self._cur_idx = idx
         self.prev_hint.place_forget()
-
         rgb = self.frames[idx]
         img = Image.fromarray(rgb)
         self.prev_canvas.update_idletasks()
-        cw = max(self.prev_canvas.winfo_width()  - 20, 50)
-        ch = max(self.prev_canvas.winfo_height() - 20, 50)
-        if cw < 100: cw = 500
-        if ch < 100: ch = 550
-
+        cw = max(self.prev_canvas.winfo_width()-20, 100)
+        ch = max(self.prev_canvas.winfo_height()-20, 100)
         iw, ih = img.size
         scale = min(cw/iw, ch/ih, 1.0)
         img = img.resize((max(int(iw*scale),1), max(int(ih*scale),1)), Image.LANCZOS)
@@ -598,8 +801,6 @@ class App:
         self.prev_canvas.delete('all')
         self.prev_canvas.create_image(cw//2+10, ch//2+10, image=self._preview_ref, anchor='center')
         self.prev_title.config(text=f'#{idx+1} / {len(self.frames)}')
-
-        # 책갈피 버튼 색 갱신
         self.btn_bm.config(fg=self.GOLD if idx in self.bookmarks else self.MUTED)
 
     def _prev_nav(self, d):
@@ -607,34 +808,30 @@ class App:
         if 0 <= new < len(self.frames):
             self._show_preview(new)
 
-    # ── 전체 선택 / 해제
     def select_all(self):
         for i in range(len(self.frames)):
             self.selected.add(i)
-            if i < len(self._cells):
-                self._cells[i][0].config(highlightbackground=self.SEL)
+            if i < len(self._cells): self._cells[i][0].config(highlightbackground=self.SEL)
         self._update_status()
 
     def deselect_all(self):
         self.selected.clear()
-        for c, _ in self._cells:
-            c.config(highlightbackground=self.DESEL)
+        for c, _ in self._cells: c.config(highlightbackground=self.DESEL)
         self._update_status()
 
-    # ── 저장
     def save_selected(self):
         if not self.selected:
-            messagebox.showwarning('알림', '선택된 프레임이 없습니다.\n선택하기 버튼을 켜고 프레임을 선택하세요.')
+            messagebox.showwarning('알림', '선택된 프레임이 없습니다.')
             return
         self._save_frames(sorted(self.selected), '선택')
 
     def save_bookmarks(self):
         if not self.bookmarks:
-            messagebox.showwarning('알림', '책갈피된 프레임이 없습니다.\n미리보기의 🔖 버튼으로 책갈피를 추가하세요.')
+            messagebox.showwarning('알림', '책갈피된 프레임이 없습니다.')
             return
         self._save_frames(sorted(self.bookmarks), '책갈피')
 
-    def _save_frames(self, indices: list, label: str):
+    def _save_frames(self, indices, label):
         folder = filedialog.askdirectory(title='저장 폴더 선택')
         if not folder: return
         saved = 0
@@ -643,9 +840,8 @@ class App:
                 Image.fromarray(self.frames[idx]).save(
                     os.path.join(folder, f'frame_{idx+1:04d}.png'))
                 saved += 1
-        messagebox.showinfo('저장 완료', f'✅ {label} {saved}개 프레임 저장 완료\n\n📁 {folder}')
+        messagebox.showinfo('저장 완료', f'✅ {label} {saved}개 저장 완료\n\n📁 {folder}')
 
-    # ── 초기화
     def clear_all(self):
         if self.frames and not messagebox.askyesno('초기화', '모든 프레임을 삭제할까요?'):
             return
