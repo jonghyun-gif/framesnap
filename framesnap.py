@@ -11,13 +11,6 @@ import os
 import numpy as np
 from PIL import Image, ImageTk
 
-# Windows DPI 스케일링 문제 방지 (반드시 tk 초기화 전에 설정)
-try:
-    import ctypes
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor DPI Aware
-except Exception:
-    pass
-
 try:
     import mss
     MSS_AVAILABLE = True
@@ -870,32 +863,10 @@ class App:
         sel.focus_force()
         sel.update()
 
-        # tkinter 논리 좌표 → 실제 물리 픽셀 변환 배율
-        # GetSystemMetrics(0/1) = 물리 해상도, winfo_screenwidth/height = 논리 해상도
-        try:
-            import ctypes
-            phys_w = ctypes.windll.user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
-            phys_h = ctypes.windll.user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
-            logic_w = sel.winfo_screenwidth()
-            logic_h = sel.winfo_screenheight()
-            dpi_x = phys_w / logic_w if logic_w > 0 else 1.0
-            dpi_y = phys_h / logic_h if logic_h > 0 else 1.0
-            # 배율이 비정상이면 1.0으로
-            if not (0.5 <= dpi_x <= 4.0): dpi_x = 1.0
-            if not (0.5 <= dpi_y <= 4.0): dpi_y = 1.0
-        except Exception:
-            dpi_x = dpi_y = 1.0
-
         canvas = tk.Canvas(sel, cursor='cross', bg='black', highlightthickness=0)
         canvas.pack(fill='both', expand=True)
         tk.Label(sel, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
                  bg='black', fg='white', font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.05, anchor='center')
-
-        # DPI 정보 표시 (디버그용)
-        dpi_info = tk.Label(sel, text=f'DPI배율: {dpi_x:.2f}x', bg='black', fg='#555',
-                             font=('Consolas', 9))
-        dpi_info.place(relx=0.99, rely=0.99, anchor='se')
-
         size_lbl = tk.Label(sel, text='', bg='#cc0000', fg='white',
                              font=('Consolas', 12, 'bold'), padx=10, pady=4)
 
@@ -909,8 +880,7 @@ class App:
             canvas.coords(state['rect'], state['sx'], state['sy'], e.x, e.y)
             w = abs(e.x - state['sx'])
             h = abs(e.y - state['sy'])
-            rw, rh = int(w * dpi_x), int(h * dpi_y)
-            size_lbl.config(text=f' {rw} × {rh} ')
+            size_lbl.config(text=f' {w} × {h} ')
             lx = min(e.x + 14, sel.winfo_width() - 140)
             ly = min(e.y + 14, sel.winfo_height() - 50)
             size_lbl.place(x=lx, y=ly)
@@ -921,11 +891,12 @@ class App:
             sel.destroy()
             self.root.deiconify()
             if x2 - x1 > 10 and y2 - y1 > 10:
+                # DPI 보정 없이 tkinter 좌표 그대로 사용
                 region = {
-                    'top':    int(y1 * dpi_y),
-                    'left':   int(x1 * dpi_x),
-                    'width':  int((x2 - x1) * dpi_x),
-                    'height': int((y2 - y1) * dpi_y),
+                    'top':    y1,
+                    'left':   x1,
+                    'width':  x2 - x1,
+                    'height': y2 - y1,
                 }
                 self._on_region(region)
             else:
