@@ -640,10 +640,9 @@ class App:
                                   font=('맑은 고딕', 10, 'bold'))
         self.shot_lbl.pack(side='right')
 
-        # ── 재생 컨트롤 바 (높이 키움)
-        ctrl = tk.Frame(self.root, bg=self.PANEL, height=80)
+        # ── 재생 컨트롤 바 (높이 자동)
+        ctrl = tk.Frame(self.root, bg=self.PANEL)
         ctrl.pack(fill='x', pady=(4,0))
-        ctrl.pack_propagate(False)
 
         # 속도 버튼
         spd_f = tk.Frame(ctrl, bg=self.PANEL)
@@ -859,9 +858,107 @@ class App:
         if not MSS_AVAILABLE:
             messagebox.showerror('오류', 'pip install mss 후 재실행하세요.')
             return
-        # withdraw: 창을 완전히 숨김 (iconify보다 확실하게 화면에서 제거)
         self.root.withdraw()
-        self.root.after(500, self._open_region_selector)
+        self.root.after(300, self._open_region_selector)
+
+    def _open_region_selector(self):
+        try:
+            with mss.mss() as sct:
+                mon = sct.monitors[0]
+                raw = sct.grab(mon)
+                # mss 실제 캡처 픽셀 크기
+                cap_w = raw.width
+                cap_h = raw.height
+                mon_left = mon['left']
+                mon_top  = mon['top']
+                full_img = Image.frombytes('RGB', (cap_w, cap_h), raw.bgra, 'raw', 'BGRX')
+        except Exception as ex:
+            self.root.deiconify()
+            messagebox.showerror('오류', f'화면 캡처 실패: {ex}')
+            return
+
+        # tkinter가 인식하는 화면 논리 해상도
+        tmp = tk.Toplevel()
+        tmp.withdraw()
+        logic_w = tmp.winfo_screenwidth()
+        logic_h = tmp.winfo_screenheight()
+        tmp.destroy()
+
+        # 캔버스는 논리 해상도 크기로 만들고
+        # 이미지는 논리 해상도 크기로 리사이즈해서 표시
+        # 드래그 좌표는 논리 해상도 → 물리 픽셀 비율로 변환
+        scale_x = cap_w / logic_w  # 물리/논리 비율
+        scale_y = cap_h / logic_h
+
+        display_img = full_img.resize((logic_w, logic_h), Image.LANCZOS)
+        dark = Image.new('RGB', (logic_w, logic_h), (0, 0, 0))
+        display_img = Image.blend(display_img, dark, 0.5)
+
+        sel = tk.Toplevel()
+        sel.overrideredirect(True)
+        sel.attributes('-topmost', True)
+        sel.geometry(f'{logic_w}x{logic_h}+{mon_left}+{mon_top}')
+        sel.lift()
+        sel.focus_force()
+
+        bg_photo = ImageTk.PhotoImage(display_img)
+        canvas = tk.Canvas(sel, cursor='cross', highlightthickness=0,
+                           width=logic_w, height=logic_h)
+        canvas.pack()
+        canvas.create_image(0, 0, anchor='nw', image=bg_photo)
+        canvas._bg = bg_photo
+
+        tk.Label(sel, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
+                 bg='black', fg='white',
+                 font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.04, anchor='center')
+
+        size_lbl = tk.Label(sel, text='', bg='#cc0000', fg='white',
+                             font=('Consolas', 12, 'bold'), padx=10, pady=4)
+
+        state = {'sx': 0, 'sy': 0, 'rect': None}
+
+        def press(e):
+            state['sx'], state['sy'] = e.x, e.y
+            state['rect'] = canvas.create_rectangle(
+                e.x, e.y, e.x, e.y, outline='red', width=3)
+
+        def drag(e):
+            canvas.coords(state['rect'], state['sx'], state['sy'], e.x, e.y)
+            # 실제 녹화될 물리 픽셀 크기 표시
+            w = int(abs(e.x - state['sx']) * scale_x)
+            h = int(abs(e.y - state['sy']) * scale_y)
+            size_lbl.config(text=f' {w} × {h} ')
+            lx = min(e.x + 14, logic_w - 160)
+            ly = min(e.y + 14, logic_h - 50)
+            size_lbl.place(x=lx, y=ly)
+
+        def release(e):
+            # 논리 좌표 → 물리 픽셀 좌표 변환
+            lx1 = min(state['sx'], e.x)
+            ly1 = min(state['sy'], e.y)
+            lx2 = max(state['sx'], e.x)
+            ly2 = max(state['sy'], e.y)
+            sel.destroy()
+            self.root.deiconify()
+            if lx2 - lx1 > 10 and ly2 - ly1 > 10:
+                self._on_region({
+                    'top':    int(ly1 * scale_y) + mon_top,
+                    'left':   int(lx1 * scale_x) + mon_left,
+                    'width':  int((lx2 - lx1) * scale_x),
+                    'height': int((ly2 - ly1) * scale_y),
+                })
+            else:
+                self._on_region(None)
+
+        def cancel(e=None):
+            sel.destroy()
+            self.root.deiconify()
+            self._on_region(None)
+
+        canvas.bind('<ButtonPress-1>',   press)
+        canvas.bind('<B1-Motion>',       drag)
+        canvas.bind('<ButtonRelease-1>', release)
+        sel.bind('<Escape>', cancel)
 
     def _open_region_selector(self):
         import ctypes
