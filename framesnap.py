@@ -854,19 +854,17 @@ class App:
         self.root.after(500, self._open_region_selector)
 
     def _open_region_selector(self):
-        # ── mss로 실제 모니터 정보 파악 ──
-        # tkinter fullscreen은 주 모니터 기준 논리 해상도를 씀
-        # mss는 물리 픽셀 기준 → 두 값의 비율로 보정
-        try:
-            with mss.mss() as sct:
-                # 주 모니터 (monitors[1])
-                mon = sct.monitors[1]
-                phys_w = mon['width']
-                phys_h = mon['height']
-                phys_left = mon['left']
-                phys_top  = mon['top']
-        except Exception:
-            phys_w = phys_h = phys_left = phys_top = None
+        # Windows API로 실제 마우스 좌표를 직접 읽음
+        # tkinter 좌표계/DPI/모니터 설정에 영향받지 않음
+        import ctypes
+
+        class POINT(ctypes.Structure):
+            _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
+
+        def get_cursor_pos():
+            pt = POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            return pt.x, pt.y
 
         sel = tk.Toplevel()
         sel.attributes('-fullscreen', True)
@@ -877,64 +875,81 @@ class App:
         sel.focus_force()
         sel.update()
 
-        # tkinter가 보고하는 논리 해상도
-        logic_w = sel.winfo_width()
-        logic_h = sel.winfo_height()
-
-        # 스케일 계산 (물리/논리)
-        if phys_w and logic_w and logic_w > 0:
-            scale_x = phys_w / logic_w
-            scale_y = phys_h / logic_h
-        else:
-            scale_x = scale_y = 1.0
-
         canvas = tk.Canvas(sel, cursor='cross', bg='black', highlightthickness=0)
         canvas.pack(fill='both', expand=True)
         tk.Label(sel, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
-                 bg='black', fg='white', font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.05, anchor='center')
-
-        # 스케일 정보 표시 (확인용)
-        tk.Label(sel, text=f'scale: {scale_x:.2f}x  |  논리: {logic_w}×{logic_h}  |  물리: {phys_w}×{phys_h}',
-                 bg='black', fg='#666', font=('Consolas', 9)).place(relx=0.5, rely=0.97, anchor='s')
-
+                 bg='black', fg='white',
+                 font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.05, anchor='center')
         size_lbl = tk.Label(sel, text='', bg='#cc0000', fg='white',
                              font=('Consolas', 12, 'bold'), padx=10, pady=4)
 
-        state = {'sx': 0, 'sy': 0, 'rect': None}
+        # tkinter 논리좌표 → 캔버스 그리기용 스케일
+        # (선택 사각형 표시만을 위해 사용, 실제 좌표는 GetCursorPos로)
+        lw = sel.winfo_width()
+        lh = sel.winfo_height()
+        try:
+            with mss.mss() as sct:
+                mon = sct.monitors[1]
+                pw = mon['width']
+                ph = mon['height']
+        except Exception:
+            pw, ph = lw, lh
+        draw_sx = lw / pw if pw > 0 else 1.0
+        draw_sy = lh / ph if ph > 0 else 1.0
+
+        state = {
+            'sx': 0, 'sy': 0,          # 실제 물리 픽셀
+            'rect': None, 'pressed': False
+        }
 
         def press(e):
-            state['sx'], state['sy'] = e.x, e.y
-            state['rect'] = canvas.create_rectangle(e.x, e.y, e.x, e.y, outline='red', width=3)
+            rx, ry = get_cursor_pos()
+            state['sx'], state['sy'] = rx, ry
+            state['pressed'] = True
+            # 캔버스에 그리기 위한 논리 좌표로 변환
+            cx = int(rx * draw_sx)
+            cy = int(ry * draw_sy)
+            state['rect'] = canvas.create_rectangle(cx, cy, cx, cy,
+                                                     outline='red', width=3)
 
         def drag(e):
-            canvas.coords(state['rect'], state['sx'], state['sy'], e.x, e.y)
-            w = abs(e.x - state['sx'])
-            h = abs(e.y - state['sy'])
-            # 실제 녹화될 픽셀 크기 표시
-            rw = int(w * scale_x)
-            rh = int(h * scale_y)
-            size_lbl.config(text=f' {rw} × {rh} ')
-            lx = min(e.x + 14, sel.winfo_width() - 140)
-            ly = min(e.y + 14, sel.winfo_height() - 50)
+            if not state['pressed']: return
+            rx, ry = get_cursor_pos()
+            sx, sy = state['sx'], state['sy']
+            # 캔버스 그리기용
+            cx1 = int(min(sx, rx) * draw_sx)
+            cy1 = int(min(sy, ry) * draw_sy)
+            cx2 = int(max(sx, rx) * draw_sx)
+            cy2 = int(max(sy, ry) * draw_sy)
+            canvas.coords(state['rect'], cx1, cy1, cx2, cy2)
+            w = abs(rx - sx)
+            h = abs(ry - sy)
+            size_lbl.config(text=f' {w} × {h} ')
+            lx = min(int(rx * draw_sx) + 14, sel.winfo_width() - 150)
+            ly = min(int(ry * draw_sy) + 14, sel.winfo_height() - 50)
             size_lbl.place(x=lx, y=ly)
 
         def release(e):
-            x1, y1 = min(state['sx'], e.x), min(state['sy'], e.y)
-            x2, y2 = max(state['sx'], e.x), max(state['sy'], e.y)
+            if not state['pressed']: return
+            state['pressed'] = False
+            rx, ry = get_cursor_pos()
+            sx, sy = state['sx'], state['sy']
+            x1, y1 = min(sx, rx), min(sy, ry)
+            x2, y2 = max(sx, rx), max(sy, ry)
             sel.destroy()
             self.root.deiconify()
             if x2 - x1 > 10 and y2 - y1 > 10:
-                region = {
-                    'top':    int(y1 * scale_y) + phys_top  if phys_top  is not None else y1,
-                    'left':   int(x1 * scale_x) + phys_left if phys_left is not None else x1,
-                    'width':  int((x2 - x1) * scale_x),
-                    'height': int((y2 - y1) * scale_y),
-                }
-                self._on_region(region)
+                self._on_region({
+                    'top':    y1,
+                    'left':   x1,
+                    'width':  x2 - x1,
+                    'height': y2 - y1,
+                })
             else:
                 self._on_region(None)
 
         def cancel(e=None):
+            state['pressed'] = False
             sel.destroy()
             self.root.deiconify()
             self._on_region(None)
