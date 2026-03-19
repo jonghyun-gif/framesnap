@@ -11,6 +11,13 @@ import os
 import numpy as np
 from PIL import Image, ImageTk
 
+# Windows DPI 스케일링 문제 방지 (반드시 tk 초기화 전에 설정)
+try:
+    import ctypes
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor DPI Aware
+except Exception:
+    pass
+
 try:
     import mss
     MSS_AVAILABLE = True
@@ -523,9 +530,11 @@ class App:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title('FrameSnap')
-        self.root.geometry('1280x820')
+        self.root.geometry('1600x1000')
         self.root.minsize(800, 560)
         self.root.configure(bg=self.BG)
+        # 시작 시 최대화
+        self.root.state('zoomed')
 
         self.recorder:   Recorder | None         = None
         self.float_ctrl: FloatingControls | None = None
@@ -813,9 +822,87 @@ class App:
         if not MSS_AVAILABLE:
             messagebox.showerror('오류', 'pip install mss 후 재실행하세요.')
             return
-        self.root.iconify()
-        # 창이 완전히 최소화될 때까지 대기 후 선택 오버레이 열기 (1번 버그 수정)
-        self.root.after(400, lambda: RegionSelector(self._on_region))
+        # withdraw: 창을 완전히 숨김 (iconify보다 확실하게 화면에서 제거)
+        self.root.withdraw()
+        self.root.after(500, self._open_region_selector)
+
+    def _open_region_selector(self):
+        sel = tk.Toplevel()
+        sel.attributes('-fullscreen', True)
+        sel.attributes('-topmost', True)
+        sel.configure(bg='black')
+        sel.attributes('-alpha', 0.45)
+        sel.lift()
+        sel.focus_force()
+        sel.update()
+
+        # DPI 스케일 보정: tkinter 좌표 → 실제 화면 픽셀
+        # winfo_screenwidth()는 논리 픽셀, 실제 물리 픽셀과 다를 수 있음
+        try:
+            import ctypes
+            # Windows DPI awareness 설정
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            scale_x = sel.winfo_screenwidth()  / sel.winfo_fpixels('1i') * 72
+            scale_y = sel.winfo_screenheight() / sel.winfo_fpixels('1i') * 72
+            # 실제 물리 해상도
+            phys_w = ctypes.windll.user32.GetSystemMetrics(0)
+            phys_h = ctypes.windll.user32.GetSystemMetrics(1)
+            logic_w = sel.winfo_screenwidth()
+            logic_h = sel.winfo_screenheight()
+            dpi_x = phys_w / logic_w
+            dpi_y = phys_h / logic_h
+        except Exception:
+            dpi_x = dpi_y = 1.0
+
+        canvas = tk.Canvas(sel, cursor='cross', bg='black', highlightthickness=0)
+        canvas.pack(fill='both', expand=True)
+        tk.Label(sel, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
+                 bg='black', fg='white', font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.05, anchor='center')
+        size_lbl = tk.Label(sel, text='', bg='#cc0000', fg='white',
+                             font=('Consolas', 11, 'bold'), padx=8, pady=3)
+
+        state = {'sx': 0, 'sy': 0, 'rect': None}
+
+        def press(e):
+            state['sx'], state['sy'] = e.x, e.y
+            state['rect'] = canvas.create_rectangle(e.x, e.y, e.x, e.y, outline='red', width=3)
+
+        def drag(e):
+            canvas.coords(state['rect'], state['sx'], state['sy'], e.x, e.y)
+            w = abs(e.x - state['sx'])
+            h = abs(e.y - state['sy'])
+            # 실제 픽셀 크기로 표시
+            rw, rh = int(w * dpi_x), int(h * dpi_y)
+            size_lbl.config(text=f' {rw} × {rh} ')
+            size_lbl.place(x=min(e.x + 14, sel.winfo_width() - 120),
+                           y=min(e.y + 14, sel.winfo_height() - 40))
+
+        def release(e):
+            x1, y1 = min(state['sx'], e.x), min(state['sy'], e.y)
+            x2, y2 = max(state['sx'], e.x), max(state['sy'], e.y)
+            sel.destroy()
+            self.root.deiconify()
+            if x2-x1 > 10 and y2-y1 > 10:
+                # DPI 보정 적용하여 실제 픽셀 좌표로 변환
+                region = {
+                    'top':    int(y1 * dpi_y),
+                    'left':   int(x1 * dpi_x),
+                    'width':  int((x2 - x1) * dpi_x),
+                    'height': int((y2 - y1) * dpi_y),
+                }
+                self._on_region(region)
+            else:
+                self._on_region(None)
+
+        def cancel(e=None):
+            sel.destroy()
+            self.root.deiconify()
+            self._on_region(None)
+
+        canvas.bind('<ButtonPress-1>',   press)
+        canvas.bind('<B1-Motion>',       drag)
+        canvas.bind('<ButtonRelease-1>', release)
+        sel.bind('<Escape>', cancel)
 
     def _on_region(self, region):
         self.root.deiconify()
