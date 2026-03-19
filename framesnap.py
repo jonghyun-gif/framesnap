@@ -541,7 +541,8 @@ class App:
         self.region:     dict | None             = None
         self.fps_var     = tk.IntVar(value=5)
         self.delay_var   = tk.BooleanVar(value=True)
-        self.auto_folder = tk.StringVar(value='')
+        self.auto_folder  = tk.StringVar(value='')
+        self.filename_var = tk.StringVar(value='screenshot')
 
         self.frames:    list = []
         self.bookmarks: set  = set()   # FramePicker와 공유
@@ -611,94 +612,122 @@ class App:
         self.canvas.pack(fill='both', expand=True, padx=8, pady=(6,0))
         self.canvas.bind('<Configure>', self._on_canvas_resize)
 
-        # ── 진행바
+        # ── 진행바 (크게)
         bar_f = tk.Frame(self.root, bg=self.BG)
-        bar_f.pack(fill='x', padx=8, pady=4)
-        self.progress = ttk.Scale(bar_f, from_=0, to=1, orient='horizontal')
-        self.progress.pack(fill='x')
+        bar_f.pack(fill='x', padx=8, pady=(6,2))
+
+        # ttk Scale 스타일 크게
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('Big.Horizontal.TScale', troughcolor='#2a2a38',
+                         sliderthickness=22, sliderrelief='flat')
+        self.progress = ttk.Scale(bar_f, from_=0, to=1, orient='horizontal',
+                                   style='Big.Horizontal.TScale')
+        self.progress.pack(fill='x', ipady=6)
         self.progress.bind('<ButtonRelease-1>', self._on_seek)
         self.progress.bind('<B1-Motion>',       self._on_seek)
 
         # 프레임 번호 / 스크린샷 카운트
         info_f = tk.Frame(self.root, bg=self.BG)
-        info_f.pack(fill='x', padx=10)
+        info_f.pack(fill='x', padx=12)
         self.frame_lbl = tk.Label(info_f, text='녹화 후 재생 가능합니다',
-                                   bg=self.BG, fg=self.MUTED, font=('Consolas', 9))
+                                   bg=self.BG, fg=self.MUTED, font=('맑은 고딕', 10))
         self.frame_lbl.pack(side='left')
         self.shot_lbl = tk.Label(info_f, text='', bg=self.BG, fg=self.GOLD,
-                                  font=('Consolas', 9, 'bold'))
+                                  font=('맑은 고딕', 10, 'bold'))
         self.shot_lbl.pack(side='right')
 
-        # ── 재생 컨트롤 바
-        ctrl = tk.Frame(self.root, bg=self.PANEL, height=58)
+        # ── 재생 컨트롤 바 (높이 키움)
+        ctrl = tk.Frame(self.root, bg=self.PANEL, height=80)
         ctrl.pack(fill='x', pady=(4,0))
         ctrl.pack_propagate(False)
 
-        # 속도
+        # 속도 버튼
         spd_f = tk.Frame(ctrl, bg=self.PANEL)
-        spd_f.pack(side='left', padx=10, pady=8)
+        spd_f.pack(side='left', padx=14, pady=10)
         tk.Label(spd_f, text='속도', bg=self.PANEL, fg=self.MUTED,
-                 font=('맑은 고딕', 8)).pack(side='left', padx=(0,4))
+                 font=('맑은 고딕', 10)).pack(side='left', padx=(0,6))
         for spd, lbl in [(0.25,'¼x'),(0.5,'½x'),(1.0,'1x'),(2.0,'2x'),(4.0,'4x')]:
             tk.Button(spd_f, text=lbl, command=lambda s=spd: self._set_speed(s),
                       bg='#2a2a38', fg=self.TEXT, relief='flat',
-                      font=('Consolas', 8, 'bold'), padx=7, pady=3,
-                      cursor='hand2', bd=0).pack(side='left', padx=2)
+                      font=('Consolas', 11, 'bold'), padx=12, pady=8,
+                      cursor='hand2', bd=0).pack(side='left', padx=3)
 
-        # 재생 버튼들
+        # 재생 버튼들 (크게)
         play_f = tk.Frame(ctrl, bg=self.PANEL)
-        play_f.pack(side='left', padx=16, pady=6)
+        play_f.pack(side='left', padx=20, pady=8)
         for txt, cmd in [('⏮', lambda: self._jump(0)),
                           ('◀◀', lambda: self._step(-10)),
                           ('◀',  lambda: self._step(-1))]:
             tk.Button(play_f, text=txt, command=cmd,
                       bg='#2a2a38', fg=self.TEXT, relief='flat',
-                      font=('Consolas', 12), padx=8, pady=4,
-                      cursor='hand2', bd=0).pack(side='left', padx=2)
+                      font=('Consolas', 15), padx=12, pady=8,
+                      cursor='hand2', bd=0).pack(side='left', padx=3)
 
         self.btn_play = tk.Button(play_f, text='▶ 재생', command=self._toggle_play,
                                    bg=self.ACCENT, fg=self.BG, relief='flat',
-                                   font=('맑은 고딕', 11, 'bold'), padx=16, pady=6,
+                                   font=('맑은 고딕', 13, 'bold'), padx=22, pady=10,
                                    cursor='hand2', bd=0)
-        self.btn_play.pack(side='left', padx=6)
+        self.btn_play.pack(side='left', padx=8)
 
         for txt, cmd in [('▶',  lambda: self._step(1)),
                           ('▶▶', lambda: self._step(10)),
                           ('⏭', lambda: self._jump_end())]:
             tk.Button(play_f, text=txt, command=cmd,
                       bg='#2a2a38', fg=self.TEXT, relief='flat',
-                      font=('Consolas', 12), padx=8, pady=4,
-                      cursor='hand2', bd=0).pack(side='left', padx=2)
+                      font=('Consolas', 15), padx=12, pady=8,
+                      cursor='hand2', bd=0).pack(side='left', padx=3)
 
-        # 저장폴더 + 📸 스크린샷
+        # ── 저장 설정 + 📸 스크린샷 (오른쪽)
         right_f = tk.Frame(ctrl, bg=self.PANEL)
-        right_f.pack(side='right', padx=10, pady=6)
+        right_f.pack(side='right', padx=14, pady=6)
 
-        folder_f = tk.Frame(right_f, bg=self.PANEL)
-        folder_f.pack(side='top', anchor='e')
-        tk.Label(folder_f, text='저장폴더:', bg=self.PANEL, fg=self.MUTED,
-                 font=('맑은 고딕', 7)).pack(side='left')
-        self.folder_lbl = tk.Label(folder_f, textvariable=self.auto_folder,
-                                    bg=self.PANEL, fg=self.TEXT,
-                                    font=('Consolas', 7), width=22, anchor='w')
-        self.folder_lbl.pack(side='left', padx=3)
-        tk.Button(folder_f, text='📁', command=self._change_folder,
-                  bg='#2a2a38', fg=self.TEXT, relief='flat',
-                  font=('Consolas', 9), padx=4, pady=1,
-                  cursor='hand2', bd=0).pack(side='left')
+        # 폴더 + 파일명 설정 그리드
+        cfg_f = tk.Frame(right_f, bg=self.PANEL)
+        cfg_f.pack(side='top', anchor='e')
 
+        # 저장 폴더 행
+        tk.Label(cfg_f, text='📁 폴더:', bg=self.PANEL, fg=self.MUTED,
+                 font=('맑은 고딕', 9)).grid(row=0, column=0, sticky='e', padx=(0,4), pady=2)
+        self.folder_lbl = tk.Label(cfg_f, textvariable=self.auto_folder,
+                                    bg='#252530', fg=self.TEXT,
+                                    font=('Consolas', 9), width=20, anchor='w', padx=4)
+        self.folder_lbl.grid(row=0, column=1, pady=2)
+        tk.Button(cfg_f, text='변경', command=self._change_folder,
+                  bg='#3a3a50', fg=self.TEXT, relief='flat',
+                  font=('맑은 고딕', 9, 'bold'), padx=8, pady=2,
+                  cursor='hand2', bd=0).grid(row=0, column=2, padx=(4,0), pady=2)
+
+        # 파일명 행
+        tk.Label(cfg_f, text='📄 파일명:', bg=self.PANEL, fg=self.MUTED,
+                 font=('맑은 고딕', 9)).grid(row=1, column=0, sticky='e', padx=(0,4), pady=2)
+        self.filename_var = tk.StringVar(value='screenshot')
+        fn_entry = tk.Entry(cfg_f, textvariable=self.filename_var,
+                            bg='#252530', fg=self.TEXT, insertbackground=self.TEXT,
+                            relief='flat', font=('Consolas', 9), width=20)
+        fn_entry.grid(row=1, column=1, pady=2, ipady=3)
+        tk.Label(cfg_f, text='_0001.png', bg=self.PANEL, fg=self.MUTED,
+                 font=('Consolas', 9)).grid(row=1, column=2, padx=(4,0), pady=2, sticky='w')
+
+        # 📸 스크린샷 버튼
         tk.Button(right_f, text='📸  스크린샷  [S]',
                   command=self._take_screenshot,
                   bg=self.RED, fg='white', relief='flat',
-                  font=('맑은 고딕', 11, 'bold'), padx=16, pady=6,
-                  cursor='hand2', bd=0).pack(side='bottom', pady=2)
+                  font=('맑은 고딕', 12, 'bold'), padx=18, pady=8,
+                  cursor='hand2', bd=0).pack(side='bottom', pady=(4,0))
 
-        # 키 바인딩
-        self.root.bind('<space>', lambda e: self._toggle_play())
-        self.root.bind('<Left>',  lambda e: self._step(-1))
-        self.root.bind('<Right>', lambda e: self._step(1))
-        self.root.bind('<s>',     lambda e: self._take_screenshot())
-        self.root.bind('<S>',     lambda e: self._take_screenshot())
+        # 키 바인딩 - Entry에 포커스 있을 때는 무시
+        def _key_guard(fn):
+            def handler(e):
+                if isinstance(e.widget, tk.Entry): return
+                fn()
+            return handler
+
+        self.root.bind('<space>', _key_guard(self._toggle_play))
+        self.root.bind('<Left>',  _key_guard(lambda: self._step(-1)))
+        self.root.bind('<Right>', _key_guard(lambda: self._step(1)))
+        self.root.bind('<s>',     _key_guard(self._take_screenshot))
+        self.root.bind('<S>',     _key_guard(self._take_screenshot))
 
         # 초기 안내 이미지
         self._draw_empty()
@@ -799,11 +828,16 @@ class App:
             if not folder: return
             self.auto_folder.set(folder)
         self.screenshot_count += 1
-        path = os.path.join(folder, f'screenshot_{self.screenshot_count:04d}_f{self.idx+1}.png')
+        # 사용자가 설정한 파일명 사용
+        base = self.filename_var.get().strip() or 'screenshot'
+        # 파일명에 사용 불가한 문자 제거
+        for ch in r'\/:*?"<>|':
+            base = base.replace(ch, '_')
+        path = os.path.join(folder, f'{base}_{self.screenshot_count:04d}.png')
         Image.fromarray(self.frames[self.idx]).save(path)
         self.canvas.configure(bg='white')
         self.root.after(80, lambda: self.canvas.configure(bg='#080810'))
-        self.shot_lbl.config(text=f'📸 스크린샷 {self.screenshot_count}장 저장됨')
+        self.shot_lbl.config(text=f'📸 {self.screenshot_count}장 저장됨')
         self.status_var.set(f'📸 저장  →  {path}')
 
     def _change_folder(self):
