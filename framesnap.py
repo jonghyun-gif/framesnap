@@ -114,25 +114,35 @@ class FloatingControls:
         self.win.overrideredirect(True)
         self.win.attributes('-topmost', True)
         self.win.configure(bg='#1a1a1a')
-        bw, bh = 340, 56
-        cx = region['left'] + region['width'] // 2 - bw // 2
-        cy = region['top'] - bh - 8
-        if cy < 0: cy = region['top'] + 8
-        self.win.geometry(f'{bw}x{bh}+{cx}+{cy}')
+
         frame = tk.Frame(self.win, bg='#1a1a1a')
-        frame.pack(fill='both', expand=True, padx=6, pady=6)
+        frame.pack(fill='both', expand=True, padx=10, pady=8)
+
         self.rec_lbl = tk.Label(frame, text='⏺ REC', bg='#1a1a1a', fg='red',
-                                 font=('Consolas', 14, 'bold'))
-        self.rec_lbl.pack(side='left', padx=10)
+                                 font=('Consolas', 16, 'bold'))
+        self.rec_lbl.pack(side='left', padx=12)
+
         self.btn_pause = tk.Button(frame, text='⏸ 일시정지', command=self._toggle_pause,
                                     bg='#444', fg='white', relief='flat',
-                                    font=('맑은 고딕', 11, 'bold'), padx=10, pady=6,
+                                    font=('맑은 고딕', 13, 'bold'), padx=16, pady=8,
                                     cursor='hand2', bd=0)
-        self.btn_pause.pack(side='left', padx=4)
+        self.btn_pause.pack(side='left', padx=6)
+
         tk.Button(frame, text='⏹ 중지', command=on_stop,
                   bg='#FF4E6A', fg='white', relief='flat',
-                  font=('맑은 고딕', 11, 'bold'), padx=14, pady=6,
-                  cursor='hand2', bd=0).pack(side='left', padx=4)
+                  font=('맑은 고딕', 13, 'bold'), padx=20, pady=8,
+                  cursor='hand2', bd=0).pack(side='left', padx=6)
+
+        # 크기를 내용에 맞게 자동 계산
+        self.win.update_idletasks()
+        bw = self.win.winfo_reqwidth()
+        bh = self.win.winfo_reqheight()
+
+        cx = region['left'] + region['width'] // 2 - bw // 2
+        cy = region['top'] - bh - 10
+        if cy < 0: cy = region['top'] + 10
+        self.win.geometry(f'{bw}x{bh}+{cx}+{cy}')
+
         for w in (frame, self.rec_lbl):
             w.bind('<ButtonPress-1>', self._drag_start)
             w.bind('<B1-Motion>',     self._drag_move)
@@ -854,10 +864,19 @@ class App:
         self.root.after(500, self._open_region_selector)
 
     def _open_region_selector(self):
-        # Windows API로 실제 마우스 좌표를 직접 읽음
-        # tkinter 좌표계/DPI/모니터 설정에 영향받지 않음
         import ctypes
 
+        # 물리 픽셀 기준 전체 가상 스크린 크기 (멀티모니터 포함)
+        SM_XVIRTUALSCREEN  = 76
+        SM_YVIRTUALSCREEN  = 77
+        SM_CXVIRTUALSCREEN = 78
+        SM_CYVIRTUALSCREEN = 79
+        vx = ctypes.windll.user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        vy = ctypes.windll.user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        vw = ctypes.windll.user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        vh = ctypes.windll.user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+
+        # 주 모니터 물리 해상도
         class POINT(ctypes.Structure):
             _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
 
@@ -866,76 +885,72 @@ class App:
             ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
             return pt.x, pt.y
 
+        # tkinter 창을 전체 가상 화면 크기로 생성
         sel = tk.Toplevel()
-        sel.attributes('-fullscreen', True)
+        sel.overrideredirect(True)   # 타이틀바 제거
         sel.attributes('-topmost', True)
-        sel.configure(bg='black')
         sel.attributes('-alpha', 0.45)
+        sel.configure(bg='black')
+        sel.geometry(f'{vw}x{vh}+{vx}+{vy}')
         sel.lift()
         sel.focus_force()
         sel.update()
 
+        # tkinter 논리 해상도 vs 물리 해상도 비율
+        tw = sel.winfo_width()
+        th = sel.winfo_height()
+        # 비율: 물리좌표 → tkinter 캔버스 좌표
+        sx = tw / vw if vw > 0 else 1.0
+        sy = th / vh if vh > 0 else 1.0
+        # 비율: tkinter 캔버스 좌표 → 물리좌표
+        rx_scale = vw / tw if tw > 0 else 1.0
+        ry_scale = vh / th if th > 0 else 1.0
+
         canvas = tk.Canvas(sel, cursor='cross', bg='black', highlightthickness=0)
         canvas.pack(fill='both', expand=True)
+
         tk.Label(sel, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
                  bg='black', fg='white',
                  font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.05, anchor='center')
+
         size_lbl = tk.Label(sel, text='', bg='#cc0000', fg='white',
                              font=('Consolas', 12, 'bold'), padx=10, pady=4)
 
-        # tkinter 논리좌표 → 캔버스 그리기용 스케일
-        # (선택 사각형 표시만을 위해 사용, 실제 좌표는 GetCursorPos로)
-        lw = sel.winfo_width()
-        lh = sel.winfo_height()
-        try:
-            with mss.mss() as sct:
-                mon = sct.monitors[1]
-                pw = mon['width']
-                ph = mon['height']
-        except Exception:
-            pw, ph = lw, lh
-        draw_sx = lw / pw if pw > 0 else 1.0
-        draw_sy = lh / ph if ph > 0 else 1.0
-
-        state = {
-            'sx': 0, 'sy': 0,          # 실제 물리 픽셀
-            'rect': None, 'pressed': False
-        }
+        state = {'px': 0, 'py': 0, 'rect': None, 'down': False}
 
         def press(e):
-            rx, ry = get_cursor_pos()
-            state['sx'], state['sy'] = rx, ry
-            state['pressed'] = True
-            # 캔버스에 그리기 위한 논리 좌표로 변환
-            cx = int(rx * draw_sx)
-            cy = int(ry * draw_sy)
+            px, py = get_cursor_pos()
+            state['px'], state['py'] = px, py
+            state['down'] = True
+            # 캔버스 그리기용 논리 좌표
+            cx = int((px - vx) * sx)
+            cy = int((py - vy) * sy)
             state['rect'] = canvas.create_rectangle(cx, cy, cx, cy,
                                                      outline='red', width=3)
 
         def drag(e):
-            if not state['pressed']: return
-            rx, ry = get_cursor_pos()
-            sx, sy = state['sx'], state['sy']
-            # 캔버스 그리기용
-            cx1 = int(min(sx, rx) * draw_sx)
-            cy1 = int(min(sy, ry) * draw_sy)
-            cx2 = int(max(sx, rx) * draw_sx)
-            cy2 = int(max(sy, ry) * draw_sy)
-            canvas.coords(state['rect'], cx1, cy1, cx2, cy2)
-            w = abs(rx - sx)
-            h = abs(ry - sy)
+            if not state['down']: return
+            px, py = get_cursor_pos()
+            x1 = int((min(state['px'], px) - vx) * sx)
+            y1 = int((min(state['py'], py) - vy) * sy)
+            x2 = int((max(state['px'], px) - vx) * sx)
+            y2 = int((max(state['py'], py) - vy) * sy)
+            canvas.coords(state['rect'], x1, y1, x2, y2)
+            w = abs(px - state['px'])
+            h = abs(py - state['py'])
             size_lbl.config(text=f' {w} × {h} ')
-            lx = min(int(rx * draw_sx) + 14, sel.winfo_width() - 150)
-            ly = min(int(ry * draw_sy) + 14, sel.winfo_height() - 50)
+            lx = min(int((px - vx) * sx) + 14, tw - 160)
+            ly = min(int((py - vy) * sy) + 14, th - 50)
             size_lbl.place(x=lx, y=ly)
 
         def release(e):
-            if not state['pressed']: return
-            state['pressed'] = False
-            rx, ry = get_cursor_pos()
-            sx, sy = state['sx'], state['sy']
-            x1, y1 = min(sx, rx), min(sy, ry)
-            x2, y2 = max(sx, rx), max(sy, ry)
+            if not state['down']: return
+            state['down'] = False
+            px, py = get_cursor_pos()
+            x1 = min(state['px'], px)
+            y1 = min(state['py'], py)
+            x2 = max(state['px'], px)
+            y2 = max(state['py'], py)
             sel.destroy()
             self.root.deiconify()
             if x2 - x1 > 10 and y2 - y1 > 10:
@@ -949,7 +964,7 @@ class App:
                 self._on_region(None)
 
         def cancel(e=None):
-            state['pressed'] = False
+            state['down'] = False
             sel.destroy()
             self.root.deiconify()
             self._on_region(None)
