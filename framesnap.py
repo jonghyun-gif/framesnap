@@ -3,6 +3,17 @@ FrameSnap – 화면 영역 녹화 & 프레임 추출기
 메인화면 = 영상 재생 / 서브팝업 = 프레임 선택 저장
 """
 
+# Windows DPI: 반드시 tkinter import 전에 설정
+import ctypes
+try:
+    # Per-Monitor V2 DPI Aware → tkinter 창이 물리 픽셀 1:1로 동작
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
@@ -864,11 +875,10 @@ class App:
     def _open_region_selector(self):
         try:
             with mss.mss() as sct:
-                mon = sct.monitors[0]
+                mon = sct.monitors[0]          # 전체 가상화면
                 raw = sct.grab(mon)
-                # mss 실제 캡처 픽셀 크기
-                cap_w = raw.width
-                cap_h = raw.height
+                cap_w    = raw.width           # 물리 픽셀 너비
+                cap_h    = raw.height          # 물리 픽셀 높이
                 mon_left = mon['left']
                 mon_top  = mon['top']
                 full_img = Image.frombytes('RGB', (cap_w, cap_h), raw.bgra, 'raw', 'BGRX')
@@ -877,40 +887,32 @@ class App:
             messagebox.showerror('오류', f'화면 캡처 실패: {ex}')
             return
 
-        # tkinter가 인식하는 화면 논리 해상도
-        tmp = tk.Toplevel()
-        tmp.withdraw()
-        logic_w = tmp.winfo_screenwidth()
-        logic_h = tmp.winfo_screenheight()
-        tmp.destroy()
-
-        # 캔버스는 논리 해상도 크기로 만들고
-        # 이미지는 논리 해상도 크기로 리사이즈해서 표시
-        # 드래그 좌표는 논리 해상도 → 물리 픽셀 비율로 변환
-        scale_x = cap_w / logic_w  # 물리/논리 비율
-        scale_y = cap_h / logic_h
-
-        display_img = full_img.resize((logic_w, logic_h), Image.LANCZOS)
-        dark = Image.new('RGB', (logic_w, logic_h), (0, 0, 0))
-        display_img = Image.blend(display_img, dark, 0.5)
+        # 어둡게 처리한 배경 이미지 (물리 픽셀 크기 그대로)
+        dark = Image.new('RGB', (cap_w, cap_h), (0, 0, 0))
+        bg   = Image.blend(full_img, dark, 0.5)
 
         sel = tk.Toplevel()
         sel.overrideredirect(True)
         sel.attributes('-topmost', True)
-        sel.geometry(f'{logic_w}x{logic_h}+{mon_left}+{mon_top}')
+
+        # ★ 핵심: tkinter 창을 물리 픽셀 크기로 강제 설정
+        # geometry에 물리 픽셀 크기를 직접 넣으면
+        # Windows가 DPI 배율 없이 1:1로 매핑
+        sel.geometry(f'{cap_w}x{cap_h}+{mon_left}+{mon_top}')
         sel.lift()
         sel.focus_force()
+        sel.update()
 
-        bg_photo = ImageTk.PhotoImage(display_img)
+        bg_photo = ImageTk.PhotoImage(bg)
         canvas = tk.Canvas(sel, cursor='cross', highlightthickness=0,
-                           width=logic_w, height=logic_h)
+                           width=cap_w, height=cap_h)
         canvas.pack()
         canvas.create_image(0, 0, anchor='nw', image=bg_photo)
         canvas._bg = bg_photo
 
         tk.Label(sel, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
                  bg='black', fg='white',
-                 font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.04, anchor='center')
+                 font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.03, anchor='center')
 
         size_lbl = tk.Label(sel, text='', bg='#cc0000', fg='white',
                              font=('Consolas', 12, 'bold'), padx=10, pady=4)
@@ -924,28 +926,26 @@ class App:
 
         def drag(e):
             canvas.coords(state['rect'], state['sx'], state['sy'], e.x, e.y)
-            # 실제 녹화될 물리 픽셀 크기 표시
-            w = int(abs(e.x - state['sx']) * scale_x)
-            h = int(abs(e.y - state['sy']) * scale_y)
+            w = abs(e.x - state['sx'])
+            h = abs(e.y - state['sy'])
             size_lbl.config(text=f' {w} × {h} ')
-            lx = min(e.x + 14, logic_w - 160)
-            ly = min(e.y + 14, logic_h - 50)
+            lx = min(e.x + 14, cap_w - 160)
+            ly = min(e.y + 14, cap_h - 50)
             size_lbl.place(x=lx, y=ly)
 
         def release(e):
-            # 논리 좌표 → 물리 픽셀 좌표 변환
-            lx1 = min(state['sx'], e.x)
-            ly1 = min(state['sy'], e.y)
-            lx2 = max(state['sx'], e.x)
-            ly2 = max(state['sy'], e.y)
+            x1 = min(state['sx'], e.x) + mon_left
+            y1 = min(state['sy'], e.y) + mon_top
+            x2 = max(state['sx'], e.x) + mon_left
+            y2 = max(state['sy'], e.y) + mon_top
             sel.destroy()
             self.root.deiconify()
-            if lx2 - lx1 > 10 and ly2 - ly1 > 10:
+            if x2 - x1 > 10 and y2 - y1 > 10:
                 self._on_region({
-                    'top':    int(ly1 * scale_y) + mon_top,
-                    'left':   int(lx1 * scale_x) + mon_left,
-                    'width':  int((lx2 - lx1) * scale_x),
-                    'height': int((ly2 - ly1) * scale_y),
+                    'top':    y1,
+                    'left':   x1,
+                    'width':  x2 - x1,
+                    'height': y2 - y1,
                 })
             else:
                 self._on_region(None)
