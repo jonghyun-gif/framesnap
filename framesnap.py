@@ -903,7 +903,21 @@ class App:
     def _open_region_selector(self):
         import ctypes
 
-        # 마우스 위치 (물리 픽셀)
+        # ── 1. DPI 배율을 정확하게 계산
+        # tkinter winfo_fpixels('1i') = 논리 인치당 픽셀 수 (보통 72~96)
+        # Windows 실제 DPI = GetDeviceCaps 또는 96 * scale
+        # 가장 신뢰할 수 있는 방법: 임시 창으로 직접 측정
+        try:
+            _tmp = tk.Toplevel()
+            _tmp.withdraw()
+            # 논리 해상도
+            logic_sw = _tmp.winfo_screenwidth()
+            logic_sh = _tmp.winfo_screenheight()
+            _tmp.destroy()
+        except Exception:
+            logic_sw, logic_sh = 1920, 1080
+
+        # 마우스 위치 (항상 물리픽셀)
         try:
             class _PT(ctypes.Structure):
                 _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
@@ -913,7 +927,7 @@ class App:
         except Exception:
             mx, my = 0, 0
 
-        # mss로 현재 모니터 찾기 + 캡처
+        # ── 2. mss로 현재 모니터 찾기 + 캡처
         try:
             with mss.mss() as sct:
                 target_mon = sct.monitors[1]
@@ -922,58 +936,63 @@ class App:
                             m['top'] <= my < m['top'] + m['height']):
                         target_mon = m
                         break
-                shot  = sct.grab(target_mon)
-                img   = Image.frombytes('RGB', shot.size, shot.bgra, 'raw', 'BGRX')
-                off_x = target_mon['left']    # 물리 픽셀 기준 모니터 위치
-                off_y = target_mon['top']
-                phys_w = target_mon['width']  # mss 물리 픽셀 너비
+                shot   = sct.grab(target_mon)
+                img    = Image.frombytes('RGB', shot.size, shot.bgra, 'raw', 'BGRX')
+                off_x  = target_mon['left']   # 물리픽셀 기준
+                off_y  = target_mon['top']
+                phys_w = target_mon['width']  # mss 물리픽셀 너비
                 phys_h = target_mon['height']
         except Exception as ex:
             self.root.deiconify()
             messagebox.showerror('오류', f'화면 캡처 실패: {ex}')
             return
 
-        # tkinter 논리 해상도 (DPI 배율 적용 전)
-        logic_sw = self.root.winfo_screenwidth()
-        logic_sh = self.root.winfo_screenheight()
+        # ── 3. DPI 배율 = 주 모니터 물리픽셀 / tkinter 논리픽셀
+        # 주 모니터 물리픽셀은 GetSystemMetrics(0)으로 읽음
+        try:
+            phys_main_w = ctypes.windll.user32.GetSystemMetrics(0)
+            phys_main_h = ctypes.windll.user32.GetSystemMetrics(1)
+            dpi_x = phys_main_w / logic_sw if logic_sw > 0 else 1.0
+            dpi_y = phys_main_h / logic_sh if logic_sh > 0 else 1.0
+        except Exception:
+            dpi_x = dpi_y = 1.0
 
-        # DPI 배율: 물리 / 논리
-        # 예) 1920물리 / 1280논리 = 1.5배
-        dpi_x = phys_w / logic_sw if logic_sw > 0 else 1.0
-        dpi_y = phys_h / logic_sh if logic_sh > 0 else 1.0
-
-        # 오버레이 창: 논리픽셀 크기로 geometry 설정해야 모니터에 딱 맞음
-        logic_w = int(phys_w / dpi_x)
-        logic_h = int(phys_h / dpi_y)
-        # off_x/off_y도 논리픽셀로 변환
-        logic_ox = int(off_x / dpi_x)
-        logic_oy = int(off_y / dpi_y)
+        # ── 4. 오버레이 창 크기 = 논리픽셀로 변환
+        # geometry()는 논리픽셀을 받음
+        # 현재 모니터가 주 모니터와 해상도가 다를 수 있으므로
+        # 현재 모니터 물리픽셀도 dpi로 나눔
+        ov_w = int(phys_w / dpi_x)
+        ov_h = int(phys_h / dpi_y)
+        ov_x = int(off_x  / dpi_x)
+        ov_y = int(off_y  / dpi_y)
 
         ov = tk.Toplevel()
         ov.overrideredirect(True)
         ov.attributes('-topmost', True)
-        ov.geometry(f'{logic_w}x{logic_h}+{logic_ox}+{logic_oy}')
+        ov.geometry(f'{ov_w}x{ov_h}+{ov_x}+{ov_y}')
         ov.lift()
         ov.update()
 
-        # 배경 이미지: 논리 해상도 크기로 리사이즈
+        # ── 5. 배경 이미지: 논리픽셀 크기로 리사이즈
         dimmed = Image.blend(img, Image.new('RGB', (phys_w, phys_h), (0,0,0)), 0.45)
-        if phys_w != logic_w or phys_h != logic_h:
-            display = dimmed.resize((logic_w, logic_h), Image.LANCZOS)
-        else:
-            display = dimmed
+        display = dimmed.resize((ov_w, ov_h), Image.LANCZOS) if (phys_w != ov_w) else dimmed
         bg_photo = ImageTk.PhotoImage(display)
 
         cv = tk.Canvas(ov, cursor='crosshair',
-                       width=logic_w, height=logic_h,
+                       width=ov_w, height=ov_h,
                        highlightthickness=0, bd=0)
         cv.pack()
         cv.create_image(0, 0, anchor='nw', image=bg_photo)
         cv._keep = bg_photo
 
-        cv.create_text(logic_w // 2, 36,
+        # 디버그: 실제 값 확인용 텍스트 (나중에 제거 가능)
+        cv.create_text(ov_w // 2, 20,
+                       text=f'논리:{logic_sw}x{logic_sh}  물리:{phys_main_w}x{phys_main_h}  DPI:{dpi_x:.2f}  현재모니터:{phys_w}x{phys_h}',
+                       fill='yellow', font=('Consolas', 10), tags='dbg')
+
+        cv.create_text(ov_w // 2, 52,
                        text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
-                       fill='white', font=('맑은 고딕', 14, 'bold'), tags='guide')
+                       fill='white', font=('맑은 고딕', 13, 'bold'), tags='guide')
 
         cv.create_rectangle(0, 0, 0, 0, fill='#cc0000', outline='', tags='sizebg')
         cv.create_text(0, 0, text='', fill='white',
@@ -986,7 +1005,6 @@ class App:
         def on_press(e):
             state['x0'], state['y0'] = e.x, e.y
             state['dragging'] = True
-            cv.itemconfig('guide', state='hidden')
             cv.coords('rect', e.x, e.y, e.x, e.y)
 
         def on_drag(e):
@@ -997,7 +1015,7 @@ class App:
             h = int(abs(e.y - y0) * dpi_y)
             lx = min(x0, e.x)
             ly = max(y0, e.y) + 8
-            if ly + 26 > logic_h: ly = min(y0, e.y) - 26
+            if ly + 26 > ov_h: ly = min(y0, e.y) - 26
             cv.coords('sizelbl', lx, ly)
             cv.itemconfig('sizelbl', text=f'  {w} × {h}  ')
             bb = cv.bbox('sizelbl')
@@ -1013,13 +1031,17 @@ class App:
             ov.destroy()
             self.root.deiconify()
             if rx - lx > 10 and ry - ly > 10:
-                # 논리좌표 → 물리좌표 변환 + 모니터 오프셋
-                self._on_region({
+                region = {
                     'left':   int(lx * dpi_x) + off_x,
                     'top':    int(ly * dpi_y) + off_y,
                     'width':  int((rx - lx) * dpi_x),
                     'height': int((ry - ly) * dpi_y),
-                })
+                }
+                # 상태바에 디버그 정보 표시
+                self.status_var.set(
+                    f'선택: 논리({lx},{ly}~{rx},{ry}) → 물리({region["left"]},{region["top"]} {region["width"]}x{region["height"]}) DPI:{dpi_x:.2f}'
+                )
+                self._on_region(region)
             else:
                 self._on_region(None)
 
