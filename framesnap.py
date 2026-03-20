@@ -569,10 +569,9 @@ class App:
                          cursor='hand2', state=state, bd=0, **kw)
 
     def _build(self):
-        # ── 탑바 (녹화 컨트롤)
-        bar = tk.Frame(self.root, bg=self.PANEL, height=58)
+        # ── 탑바 (높이 자동 - 버튼 잘림 방지)
+        bar = tk.Frame(self.root, bg=self.PANEL)
         bar.pack(fill='x')
-        bar.pack_propagate(False)
 
         tk.Label(bar, text='⬛ FrameSnap', bg=self.PANEL, fg=self.ACCENT,
                  font=('Consolas', 14, 'bold')).pack(side='left', padx=16)
@@ -858,70 +857,148 @@ class App:
         if not MSS_AVAILABLE:
             messagebox.showerror('오류', 'pip install mss 후 재실행하세요.')
             return
+        # 메인창 숨기기
         self.root.withdraw()
-        self.root.after(300, self._open_region_selector)
+        self.root.after(200, self._open_region_selector)
 
     def _open_region_selector(self):
-        sel = tk.Toplevel()
-        sel.attributes('-fullscreen', True)
-        sel.attributes('-alpha', 0.35)
-        sel.attributes('-topmost', True)
-        sel.configure(bg='black')
-        sel.lift()
-        sel.focus_force()
-
-        canvas = tk.Canvas(sel, cursor='cross', bg='black', highlightthickness=0)
-        canvas.pack(fill='both', expand=True)
-
-        tk.Label(sel, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
-                 bg='black', fg='white',
-                 font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.04, anchor='center')
-
-        size_lbl = tk.Label(sel, text='', bg='#cc0000', fg='white',
-                             font=('Consolas', 12, 'bold'), padx=10, pady=4)
-
-        state = {'sx': 0, 'sy': 0, 'rect': None}
-
-        def press(e):
-            state['sx'], state['sy'] = e.x, e.y
-            state['rect'] = canvas.create_rectangle(
-                e.x, e.y, e.x, e.y, outline='red', width=3)
-
-        def drag(e):
-            canvas.coords(state['rect'], state['sx'], state['sy'], e.x, e.y)
-            w = abs(e.x - state['sx'])
-            h = abs(e.y - state['sy'])
-            size_lbl.config(text=f' {w} × {h} ')
-            lx = min(e.x + 14, sel.winfo_width() - 160)
-            ly = min(e.y + 14, sel.winfo_height() - 50)
-            size_lbl.place(x=lx, y=ly)
-
-        def release(e):
-            x1 = min(state['sx'], e.x)
-            y1 = min(state['sy'], e.y)
-            x2 = max(state['sx'], e.x)
-            y2 = max(state['sy'], e.y)
-            sel.destroy()
+        """
+        윈도우 캡처 도구(Snipping Tool) 방식:
+        1. mss로 현재 전체화면 스냅샷 캡처
+        2. 스냅샷을 배경으로 전체화면 창 띄우기
+        3. 마우스 드래그 좌표 = mss 캡처 좌표 (완전 1:1)
+        """
+        try:
+            with mss.mss() as sct:
+                # 전체 가상화면 (멀티모니터 포함)
+                mon   = sct.monitors[0]
+                shot  = sct.grab(mon)
+                img   = Image.frombytes('RGB', shot.size, shot.bgra, 'raw', 'BGRX')
+                off_x = mon['left']   # 보통 0, 세컨드 모니터가 왼쪽이면 음수
+                off_y = mon['top']
+                cap_w = mon['width']
+                cap_h = mon['height']
+        except Exception as ex:
             self.root.deiconify()
-            if x2 - x1 > 10 and y2 - y1 > 10:
+            messagebox.showerror('오류', f'화면 캡처 실패: {ex}')
+            return
+
+        # ── 오버레이 창 생성
+        ov = tk.Toplevel()
+        ov.overrideredirect(True)          # 테두리/타이틀바 없음
+        ov.attributes('-topmost', True)
+        ov.geometry(f'{cap_w}x{cap_h}+{off_x}+{off_y}')
+        ov.lift()
+        ov.update()
+
+        # ── 배경: 캡처 이미지를 어둡게 블렌딩
+        dark   = Image.new('RGB', (cap_w, cap_h), (0, 0, 0))
+        dimmed = Image.blend(img, dark, 0.45)
+
+        # tkinter PhotoImage 크기 = 창 크기와 완전히 동일하게
+        bg_photo = ImageTk.PhotoImage(dimmed)
+
+        cv = tk.Canvas(ov, cursor='crosshair',
+                       width=cap_w, height=cap_h,
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        cv.create_image(0, 0, anchor='nw', image=bg_photo)
+        cv._keep = bg_photo   # GC 방지
+
+        # 안내 텍스트
+        cv.create_text(cap_w // 2, 36,
+                       text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
+                       fill='white', font=('맑은 고딕', 14, 'bold'),
+                       tags='guide')
+
+        # 크기 라벨
+        size_id = cv.create_text(0, 0, text='', fill='white',
+                                  font=('Consolas', 13, 'bold'),
+                                  anchor='nw', tags='sizelbl')
+        size_bg = cv.create_rectangle(0, 0, 0, 0,
+                                       fill='#cc0000', outline='',
+                                       tags='sizebg')
+        cv.tag_lower('sizebg', 'sizelbl')
+
+        # 선택 사각형 (반투명 효과: 밝은 테두리 + 어두운 오버레이)
+        rect_id = cv.create_rectangle(0, 0, 0, 0,
+                                       outline='#00d4ff', width=2,
+                                       tags='rect')
+        # 선택 영역 원본 이미지로 밝게 표시
+        bright_photo = ImageTk.PhotoImage(img)
+        cv._bright = bright_photo
+        bright_id = cv.create_image(0, 0, anchor='nw',
+                                     image=bright_photo, tags='bright')
+        cv.itemconfig('bright', state='hidden')
+
+        state = {'x0': 0, 'y0': 0, 'dragging': False}
+
+        def on_press(e):
+            state['x0'] = e.x
+            state['y0'] = e.y
+            state['dragging'] = True
+            cv.itemconfig('guide', state='hidden')
+            cv.itemconfig('bright', state='normal')
+            cv.coords('rect', e.x, e.y, e.x, e.y)
+
+        def on_drag(e):
+            if not state['dragging']:
+                return
+            x0, y0 = state['x0'], state['y0']
+            x1, y1 = e.x, e.y
+            # 선택 사각형 업데이트
+            cv.coords('rect', min(x0,x1), min(y0,y1), max(x0,x1), max(y0,y1))
+            # 선택 영역만 원본 밝기로 표시 (clip)
+            cv.coords('bright', 0, 0)
+
+            # 크기 라벨
+            w = abs(x1 - x0)
+            h = abs(y1 - y0)
+            lx = min(x0, x1)
+            ly = max(y0, y1) + 6
+            if ly + 30 > cap_h:
+                ly = min(y0, y1) - 30
+            txt = f'  {w} × {h}  '
+            cv.coords('sizelbl', lx, ly)
+            cv.itemconfig('sizelbl', text=txt)
+            # 배경 박스 크기 맞추기
+            bb = cv.bbox('sizelbl')
+            if bb:
+                cv.coords('sizebg', bb[0]-2, bb[1]-2, bb[2]+2, bb[3]+2)
+
+        def on_release(e):
+            if not state['dragging']:
+                return
+            state['dragging'] = False
+            x0, y0 = state['x0'], state['y0']
+            x1, y1 = e.x, e.y
+            lx = min(x0, x1)
+            ly = min(y0, y1)
+            rx = max(x0, x1)
+            ry = max(y0, y1)
+            ov.destroy()
+            self.root.deiconify()
+            if rx - lx > 10 and ry - ly > 10:
+                # off_x/off_y 더해서 실제 화면 좌표로 변환
                 self._on_region({
-                    'top':    y1,
-                    'left':   x1,
-                    'width':  x2 - x1,
-                    'height': y2 - y1,
+                    'left':   lx + off_x,
+                    'top':    ly + off_y,
+                    'width':  rx - lx,
+                    'height': ry - ly,
                 })
             else:
                 self._on_region(None)
 
-        def cancel(e=None):
-            sel.destroy()
+        def on_cancel(e=None):
+            state['dragging'] = False
+            ov.destroy()
             self.root.deiconify()
             self._on_region(None)
 
-        canvas.bind('<ButtonPress-1>',   press)
-        canvas.bind('<B1-Motion>',       drag)
-        canvas.bind('<ButtonRelease-1>', release)
-        sel.bind('<Escape>', cancel)
+        cv.bind('<ButtonPress-1>',   on_press)
+        cv.bind('<B1-Motion>',       on_drag)
+        cv.bind('<ButtonRelease-1>', on_release)
+        ov.bind('<Escape>',          on_cancel)
 
     def _open_region_selector(self):
         import ctypes
