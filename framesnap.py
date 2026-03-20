@@ -83,11 +83,22 @@ class Countdown:
         self.win.overrideredirect(True)
         self.win.attributes('-topmost', True)
         self.win.attributes('-alpha', 0.75)
-        r = region
-        self.win.geometry(f'{r["width"]}x{r["height"]}+{r["left"]}+{r["top"]}')
+        # region은 물리픽셀 → geometry용 논리픽셀로 변환
+        try:
+            import ctypes
+            logic_sw = self.win.winfo_screenwidth()
+            phys_sw  = ctypes.windll.user32.GetSystemMetrics(0)
+            dpi = phys_sw / logic_sw if logic_sw > 0 else 1.0
+        except Exception:
+            dpi = 1.0
+        lw = int(region['width']  / dpi)
+        lh = int(region['height'] / dpi)
+        lx = int(region['left']   / dpi)
+        ly = int(region['top']    / dpi)
+        self.win.geometry(f'{lw}x{lh}+{lx}+{ly}')
         self.win.configure(bg='black')
         self.lbl = tk.Label(self.win, text='3', bg='black', fg='red',
-                             font=('Consolas', min(r['height']//2, 200), 'bold'))
+                             font=('Consolas', min(lh//2, 200), 'bold'))
         self.lbl.place(relx=0.5, rely=0.45, anchor='center')
         tk.Label(self.win, text='녹화 시작까지...', bg='black', fg='white',
                  font=('맑은 고딕', 14)).place(relx=0.5, rely=0.72, anchor='center')
@@ -135,25 +146,29 @@ class FloatingControls:
 
         # 내용에 맞게 창 크기 자동 결정
         self.win.update_idletasks()
-        # winfo_reqwidth/height는 논리픽셀이지만 overrideredirect 창에선 정확함
         bw = frame.winfo_reqwidth()  + 20
         bh = frame.winfo_reqheight() + 12
-        # 최소 크기 보장
         bw = max(bw, 240)
         bh = max(bh, 40)
 
-        # 위치: 녹화 영역 바로 위 중앙, 영역을 벗어나지 않게
-        cx = region['left'] + region['width'] // 2 - bw // 2
-        cy = region['top'] - bh - 6
-        # 화면 위로 벗어나면 영역 안쪽 상단에 배치
-        if cy < 0:
-            cy = region['top'] + 4
-        # 화면 왼쪽 벗어남 방지
-        if cx < region['left']:
-            cx = region['left']
-        # 화면 오른쪽 벗어남 방지
-        if cx + bw > region['left'] + region['width']:
-            cx = region['left'] + region['width'] - bw
+        # region은 물리픽셀 → geometry에 쓸 논리픽셀로 변환
+        try:
+            import ctypes
+            logic_sw = self.win.winfo_screenwidth()
+            phys_sw  = ctypes.windll.user32.GetSystemMetrics(0)
+            dpi = phys_sw / logic_sw if logic_sw > 0 else 1.0
+        except Exception:
+            dpi = 1.0
+
+        l_left  = int(region['left']   / dpi)
+        l_top   = int(region['top']    / dpi)
+        l_width = int(region['width']  / dpi)
+
+        cx = l_left + l_width // 2 - bw // 2
+        cy = l_top - bh - 6
+        if cy < 0: cy = l_top + 4
+        if cx < l_left: cx = l_left
+        if cx + bw > l_left + l_width: cx = l_left + l_width - bw
 
         self.win.geometry(f'{bw}x{bh}+{cx}+{cy}')
 
@@ -168,18 +183,33 @@ class FloatingControls:
 
     def _create_border(self):
         r, b = self.region, 3
+        # region은 물리픽셀 → geometry용 논리픽셀로 변환
+        try:
+            import ctypes
+            logic_sw = tk._default_root.winfo_screenwidth() if tk._default_root else 1920
+            phys_sw  = ctypes.windll.user32.GetSystemMetrics(0)
+            dpi = phys_sw / logic_sw if logic_sw > 0 else 1.0
+        except Exception:
+            dpi = 1.0
+
+        ll = int(r['left']   / dpi)
+        lt = int(r['top']    / dpi)
+        lw = int(r['width']  / dpi)
+        lh = int(r['height'] / dpi)
+        lb = max(int(b / dpi), 1)
+
         for x, y, w, h in [
-            (r['left']-b, r['top']-b, r['width']+b*2, b),
-            (r['left']-b, r['top']+r['height'], r['width']+b*2, b),
-            (r['left']-b, r['top'], b, r['height']),
-            (r['left']+r['width'], r['top'], b, r['height']),
+            (ll-lb,    lt-lb,    lw+lb*2, lb),
+            (ll-lb,    lt+lh,    lw+lb*2, lb),
+            (ll-lb,    lt,       lb,      lh),
+            (ll+lw,    lt,       lb,      lh),
         ]:
-            bw = tk.Toplevel()
-            bw.overrideredirect(True)
-            bw.attributes('-topmost', True)
-            bw.geometry(f'{max(w,1)}x{max(h,1)}+{x}+{y}')
-            bw.configure(bg='red')
-            self._borders.append(bw)
+            bwin = tk.Toplevel()
+            bwin.overrideredirect(True)
+            bwin.attributes('-topmost', True)
+            bwin.geometry(f'{max(w,1)}x{max(h,1)}+{x}+{y}')
+            bwin.configure(bg='red')
+            self._borders.append(bwin)
 
     def _blink(self):
         self._blink_on = not self._blink_on
@@ -871,21 +901,9 @@ class App:
         self.root.after(200, self._open_region_selector)
 
     def _open_region_selector(self):
-        """
-        mss로 현재 모니터 캡처 → 배경으로 사용.
-        tkinter 논리좌표 → DPI 배율 곱해서 mss 물리좌표로 변환.
-        """
         import ctypes
 
-        # DPI 배율 계산 (Windows)
-        try:
-            # 주 모니터 물리 해상도
-            phys_w = ctypes.windll.user32.GetSystemMetrics(0)
-            phys_h = ctypes.windll.user32.GetSystemMetrics(1)
-        except Exception:
-            phys_w = phys_h = 0
-
-        # 마우스 커서 위치로 현재 모니터 찾기
+        # 마우스 위치 (물리 픽셀)
         try:
             class _PT(ctypes.Structure):
                 _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
@@ -895,6 +913,7 @@ class App:
         except Exception:
             mx, my = 0, 0
 
+        # mss로 현재 모니터 찾기 + 캡처
         try:
             with mss.mss() as sct:
                 target_mon = sct.monitors[1]
@@ -905,34 +924,44 @@ class App:
                         break
                 shot  = sct.grab(target_mon)
                 img   = Image.frombytes('RGB', shot.size, shot.bgra, 'raw', 'BGRX')
-                off_x = target_mon['left']
+                off_x = target_mon['left']    # 물리 픽셀 기준 모니터 위치
                 off_y = target_mon['top']
-                mon_w = target_mon['width']   # mss 물리 픽셀 너비
-                mon_h = target_mon['height']
+                phys_w = target_mon['width']  # mss 물리 픽셀 너비
+                phys_h = target_mon['height']
         except Exception as ex:
             self.root.deiconify()
             messagebox.showerror('오류', f'화면 캡처 실패: {ex}')
             return
 
-        # ── 오버레이 창 (해당 모니터에만)
+        # tkinter 논리 해상도 (DPI 배율 적용 전)
+        logic_sw = self.root.winfo_screenwidth()
+        logic_sh = self.root.winfo_screenheight()
+
+        # DPI 배율: 물리 / 논리
+        # 예) 1920물리 / 1280논리 = 1.5배
+        dpi_x = phys_w / logic_sw if logic_sw > 0 else 1.0
+        dpi_y = phys_h / logic_sh if logic_sh > 0 else 1.0
+
+        # 오버레이 창: 논리픽셀 크기로 geometry 설정해야 모니터에 딱 맞음
+        logic_w = int(phys_w / dpi_x)
+        logic_h = int(phys_h / dpi_y)
+        # off_x/off_y도 논리픽셀로 변환
+        logic_ox = int(off_x / dpi_x)
+        logic_oy = int(off_y / dpi_y)
+
         ov = tk.Toplevel()
         ov.overrideredirect(True)
         ov.attributes('-topmost', True)
-        ov.geometry(f'{mon_w}x{mon_h}+{off_x}+{off_y}')
+        ov.geometry(f'{logic_w}x{logic_h}+{logic_ox}+{logic_oy}')
         ov.lift()
         ov.update()
 
-        # tkinter가 실제로 그린 창 크기 (논리 픽셀)
-        logic_w = ov.winfo_width()
-        logic_h = ov.winfo_height()
-
-        # DPI 배율: tkinter 논리좌표 → mss 물리좌표
-        scale_x = mon_w / logic_w if logic_w > 0 else 1.0
-        scale_y = mon_h / logic_h if logic_h > 0 else 1.0
-
-        # 배경: 캡처 이미지를 논리 해상도 크기로 리사이즈
-        dimmed = Image.blend(img, Image.new('RGB', (mon_w, mon_h), (0,0,0)), 0.45)
-        display = dimmed.resize((logic_w, logic_h), Image.LANCZOS) if (logic_w != mon_w) else dimmed
+        # 배경 이미지: 논리 해상도 크기로 리사이즈
+        dimmed = Image.blend(img, Image.new('RGB', (phys_w, phys_h), (0,0,0)), 0.45)
+        if phys_w != logic_w or phys_h != logic_h:
+            display = dimmed.resize((logic_w, logic_h), Image.LANCZOS)
+        else:
+            display = dimmed
         bg_photo = ImageTk.PhotoImage(display)
 
         cv = tk.Canvas(ov, cursor='crosshair',
@@ -964,9 +993,8 @@ class App:
             if not state['dragging']: return
             x0, y0 = state['x0'], state['y0']
             cv.coords('rect', min(x0,e.x), min(y0,e.y), max(x0,e.x), max(y0,e.y))
-            # 표시용 크기는 물리 픽셀로
-            w = int(abs(e.x - x0) * scale_x)
-            h = int(abs(e.y - y0) * scale_y)
+            w = int(abs(e.x - x0) * dpi_x)
+            h = int(abs(e.y - y0) * dpi_y)
             lx = min(x0, e.x)
             ly = max(y0, e.y) + 8
             if ly + 26 > logic_h: ly = min(y0, e.y) - 26
@@ -985,12 +1013,12 @@ class App:
             ov.destroy()
             self.root.deiconify()
             if rx - lx > 10 and ry - ly > 10:
-                # 논리좌표 → 물리좌표 변환 후 off_x/off_y 더하기
+                # 논리좌표 → 물리좌표 변환 + 모니터 오프셋
                 self._on_region({
-                    'left':   int(lx * scale_x) + off_x,
-                    'top':    int(ly * scale_y) + off_y,
-                    'width':  int((rx - lx) * scale_x),
-                    'height': int((ry - ly) * scale_y),
+                    'left':   int(lx * dpi_x) + off_x,
+                    'top':    int(ly * dpi_y) + off_y,
+                    'width':  int((rx - lx) * dpi_x),
+                    'height': int((ry - ly) * dpi_y),
                 })
             else:
                 self._on_region(None)
