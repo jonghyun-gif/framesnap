@@ -985,10 +985,20 @@ class App:
         cv.create_image(0, 0, anchor='nw', image=bg_photo)
         cv._keep = bg_photo
 
-        # 디버그: 실제 값 확인용 텍스트 (나중에 제거 가능)
-        cv.create_text(ov_w // 2, 20,
-                       text=f'논리:{logic_sw}x{logic_sh}  물리:{phys_main_w}x{phys_main_h}  DPI:{dpi_x:.2f}  현재모니터:{phys_w}x{phys_h}',
-                       fill='yellow', font=('Consolas', 10), tags='dbg')
+        # 디버그: 화면 중앙에 크게 표시 (맨 앞으로)
+        cv.create_rectangle(ov_w//2 - 420, ov_h//2 - 70,
+                            ov_w//2 + 420, ov_h//2 + 70,
+                            fill='black', outline='yellow', width=3, tags='dbgbg')
+        cv.create_text(ov_w // 2, ov_h // 2 - 20,
+                       text=f'논리:{logic_sw}x{logic_sh}  물리:{phys_main_w}x{phys_main_h}  DPI:{dpi_x:.2f}',
+                       fill='yellow', font=('Consolas', 16, 'bold'), tags='dbg')
+        cv.create_text(ov_w // 2, ov_h // 2 + 20,
+                       text=f'모니터:{phys_w}x{phys_h}  오버레이:{ov_w}x{ov_h}  offset:{off_x},{off_y}',
+                       fill='yellow', font=('Consolas', 16, 'bold'), tags='dbg2')
+        # 맨 앞으로 올리기
+        cv.tag_raise('dbgbg')
+        cv.tag_raise('dbg')
+        cv.tag_raise('dbg2')
 
         cv.create_text(ov_w // 2, 52,
                        text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
