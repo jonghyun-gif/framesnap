@@ -3,17 +3,6 @@ FrameSnap – 화면 영역 녹화 & 프레임 추출기
 메인화면 = 영상 재생 / 서브팝업 = 프레임 선택 저장
 """
 
-# Windows DPI: 반드시 tkinter import 전에 설정
-import ctypes
-try:
-    # Per-Monitor V2 DPI Aware → tkinter 창이 물리 픽셀 1:1로 동작
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
@@ -873,46 +862,20 @@ class App:
         self.root.after(300, self._open_region_selector)
 
     def _open_region_selector(self):
-        try:
-            with mss.mss() as sct:
-                mon = sct.monitors[0]          # 전체 가상화면
-                raw = sct.grab(mon)
-                cap_w    = raw.width           # 물리 픽셀 너비
-                cap_h    = raw.height          # 물리 픽셀 높이
-                mon_left = mon['left']
-                mon_top  = mon['top']
-                full_img = Image.frombytes('RGB', (cap_w, cap_h), raw.bgra, 'raw', 'BGRX')
-        except Exception as ex:
-            self.root.deiconify()
-            messagebox.showerror('오류', f'화면 캡처 실패: {ex}')
-            return
-
-        # 어둡게 처리한 배경 이미지 (물리 픽셀 크기 그대로)
-        dark = Image.new('RGB', (cap_w, cap_h), (0, 0, 0))
-        bg   = Image.blend(full_img, dark, 0.5)
-
         sel = tk.Toplevel()
-        sel.overrideredirect(True)
+        sel.attributes('-fullscreen', True)
+        sel.attributes('-alpha', 0.35)
         sel.attributes('-topmost', True)
-
-        # ★ 핵심: tkinter 창을 물리 픽셀 크기로 강제 설정
-        # geometry에 물리 픽셀 크기를 직접 넣으면
-        # Windows가 DPI 배율 없이 1:1로 매핑
-        sel.geometry(f'{cap_w}x{cap_h}+{mon_left}+{mon_top}')
+        sel.configure(bg='black')
         sel.lift()
         sel.focus_force()
-        sel.update()
 
-        bg_photo = ImageTk.PhotoImage(bg)
-        canvas = tk.Canvas(sel, cursor='cross', highlightthickness=0,
-                           width=cap_w, height=cap_h)
-        canvas.pack()
-        canvas.create_image(0, 0, anchor='nw', image=bg_photo)
-        canvas._bg = bg_photo
+        canvas = tk.Canvas(sel, cursor='cross', bg='black', highlightthickness=0)
+        canvas.pack(fill='both', expand=True)
 
         tk.Label(sel, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
                  bg='black', fg='white',
-                 font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.03, anchor='center')
+                 font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.04, anchor='center')
 
         size_lbl = tk.Label(sel, text='', bg='#cc0000', fg='white',
                              font=('Consolas', 12, 'bold'), padx=10, pady=4)
@@ -929,15 +892,15 @@ class App:
             w = abs(e.x - state['sx'])
             h = abs(e.y - state['sy'])
             size_lbl.config(text=f' {w} × {h} ')
-            lx = min(e.x + 14, cap_w - 160)
-            ly = min(e.y + 14, cap_h - 50)
+            lx = min(e.x + 14, sel.winfo_width() - 160)
+            ly = min(e.y + 14, sel.winfo_height() - 50)
             size_lbl.place(x=lx, y=ly)
 
         def release(e):
-            x1 = min(state['sx'], e.x) + mon_left
-            y1 = min(state['sy'], e.y) + mon_top
-            x2 = max(state['sx'], e.x) + mon_left
-            y2 = max(state['sy'], e.y) + mon_top
+            x1 = min(state['sx'], e.x)
+            y1 = min(state['sy'], e.y)
+            x2 = max(state['sx'], e.x)
+            y2 = max(state['sy'], e.y)
             sel.destroy()
             self.root.deiconify()
             if x2 - x1 > 10 and y2 - y1 > 10:
