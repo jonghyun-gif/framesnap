@@ -1,107 +1,82 @@
 """
-FrameSnap – 화면 영역 녹화 & 프레임 추출기
-메인화면 = 영상 재생 / 서브팝업 = 프레임 선택 저장
+FrameSnap v2 – 화면 녹화 & 프레임 추출기
 """
-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import threading
-import time
-import os
+import threading, time, os
 import numpy as np
 from PIL import Image, ImageTk
 
 try:
     import mss
-    MSS_AVAILABLE = True
+    HAS_MSS = True
 except ImportError:
-    MSS_AVAILABLE = False
+    HAS_MSS = False
 
+# ── DPI 배율 (전역 1회 계산) ──────────────────────────────────
+def get_dpi_scale(root):
+    try:
+        import ctypes
+        pw = ctypes.windll.user32.GetSystemMetrics(0)
+        lw = root.winfo_screenwidth()
+        s  = pw / lw if lw > 0 else 1.0
+        return s if 0.5 <= s <= 4.0 else 1.0
+    except Exception:
+        return 1.0
 
-# ──────────────────────────────────────────────────────────────
-# 영역 선택 오버레이
-# ──────────────────────────────────────────────────────────────
-class RegionSelector:
-    def __init__(self, callback):
-        self.callback = callback
-        # 윈도우가 완전히 최소화될 때까지 충분히 대기 (1번 버그 수정)
-        self.win = tk.Toplevel()
-        self.win.after(150, self._init_overlay)
+# ── 녹화 엔진 ─────────────────────────────────────────────────
+class Recorder:
+    def __init__(self, region, fps, on_frame, is_paused):
+        self.region     = region
+        self.fps        = fps
+        self.on_frame   = on_frame
+        self.is_paused  = is_paused
+        self.running    = False
 
-    def _init_overlay(self):
-        self.win.attributes('-fullscreen', True)
-        self.win.attributes('-topmost', True)
-        self.win.configure(bg='black')
-        self.win.attributes('-alpha', 0.45)
-        self.win.lift()
-        self.win.focus_force()
-        self.canvas = tk.Canvas(self.win, cursor='cross', bg='black', highlightthickness=0)
-        self.canvas.pack(fill='both', expand=True)
-        tk.Label(self.win, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
-                 bg='black', fg='white', font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.05, anchor='center')
-        self.size_lbl = tk.Label(self.win, text='', bg='#cc0000', fg='white',
-                                  font=('Consolas', 11, 'bold'), padx=8, pady=3)
-        self.sx = self.sy = 0
-        self.rect = None
-        self.canvas.bind('<ButtonPress-1>',   self._press)
-        self.canvas.bind('<B1-Motion>',       self._drag)
-        self.canvas.bind('<ButtonRelease-1>', self._release)
-        self.win.bind('<Escape>', lambda e: self._cancel())
+    def start(self):
+        self.running = True
+        threading.Thread(target=self._loop, daemon=True).start()
 
-    def _press(self, e):
-        self.sx, self.sy = e.x, e.y
-        self.rect = self.canvas.create_rectangle(e.x, e.y, e.x, e.y, outline='red', width=3)
+    def stop(self):
+        self.running = False
 
-    def _drag(self, e):
-        self.canvas.coords(self.rect, self.sx, self.sy, e.x, e.y)
-        w, h = abs(e.x - self.sx), abs(e.y - self.sy)
-        self.size_lbl.config(text=f' {w} × {h} ')
-        self.size_lbl.place(x=e.x + 14, y=e.y + 14)
+    def _loop(self):
+        interval = 1.0 / self.fps
+        idx = 0
+        with mss.mss() as sct:
+            while self.running:
+                t0 = time.perf_counter()
+                if not self.is_paused():
+                    raw = sct.grab(self.region)
+                    arr = np.frombuffer(raw.raw, dtype=np.uint8).reshape(
+                          raw.height, raw.width, 4)
+                    self.on_frame(arr[:, :, [2,1,0]], idx)
+                    idx += 1
+                wait = interval - (time.perf_counter() - t0)
+                if wait > 0:
+                    time.sleep(wait)
 
-    def _release(self, e):
-        x1, y1 = min(self.sx, e.x), min(self.sy, e.y)
-        x2, y2 = max(self.sx, e.x), max(self.sy, e.y)
-        self.win.destroy()
-        if x2-x1 > 20 and y2-y1 > 20:
-            self.callback({'top': y1, 'left': x1, 'width': x2-x1, 'height': y2-y1})
-        else:
-            self.callback(None)
-
-    def _cancel(self):
-        self.win.destroy()
-        self.callback(None)
-
-
-# ──────────────────────────────────────────────────────────────
-# 3초 카운트다운
-# ──────────────────────────────────────────────────────────────
+# ── 카운트다운 ────────────────────────────────────────────────
 class Countdown:
-    def __init__(self, region: dict, on_done):
+    def __init__(self, region, dpi, on_done):
         self.on_done = on_done
         self.count   = 3
-        self.win     = tk.Toplevel()
+        d = dpi
+        w = int(region['width']  / d)
+        h = int(region['height'] / d)
+        x = int(region['left']   / d)
+        y = int(region['top']    / d)
+        self.win = tk.Toplevel()
         self.win.overrideredirect(True)
         self.win.attributes('-topmost', True)
         self.win.attributes('-alpha', 0.75)
-        # region은 물리픽셀 → geometry용 논리픽셀로 변환
-        try:
-            import ctypes
-            logic_sw = self.win.winfo_screenwidth()
-            phys_sw  = ctypes.windll.user32.GetSystemMetrics(0)
-            dpi = phys_sw / logic_sw if logic_sw > 0 else 1.0
-        except Exception:
-            dpi = 1.0
-        lw = int(region['width']  / dpi)
-        lh = int(region['height'] / dpi)
-        lx = int(region['left']   / dpi)
-        ly = int(region['top']    / dpi)
-        self.win.geometry(f'{lw}x{lh}+{lx}+{ly}')
+        self.win.geometry(f'{w}x{h}+{x}+{y}')
         self.win.configure(bg='black')
         self.lbl = tk.Label(self.win, text='3', bg='black', fg='red',
-                             font=('Consolas', min(lh//2, 200), 'bold'))
+                             font=('Consolas', min(h//2, 180), 'bold'))
         self.lbl.place(relx=0.5, rely=0.45, anchor='center')
         tk.Label(self.win, text='녹화 시작까지...', bg='black', fg='white',
-                 font=('맑은 고딕', 14)).place(relx=0.5, rely=0.72, anchor='center')
+                 font=('맑은 고딕', 13)).place(relx=0.5, rely=0.75, anchor='center')
         self._tick()
 
     def _tick(self):
@@ -113,125 +88,87 @@ class Countdown:
             self.win.destroy()
             self.on_done()
 
-
-# ──────────────────────────────────────────────────────────────
-# 녹화 중 플로팅 컨트롤 바
-# ──────────────────────────────────────────────────────────────
-class FloatingControls:
-    def __init__(self, region: dict, on_stop):
-        self.region = region
+# ── 녹화 중 플로팅 바 ─────────────────────────────────────────
+class RecBar:
+    def __init__(self, region, dpi, on_stop):
         self.paused = False
-        self.win    = tk.Toplevel()
+        d = dpi
+        rl = int(region['left'] / d)
+        rt = int(region['top']  / d)
+        rw = int(region['width'] / d)
+
+        self.win = tk.Toplevel()
         self.win.overrideredirect(True)
         self.win.attributes('-topmost', True)
-        self.win.configure(bg='#1a1a1a')
+        self.win.configure(bg='#111')
 
-        frame = tk.Frame(self.win, bg='#1a1a1a')
-        frame.pack(fill='both', expand=True, padx=8, pady=6)
+        f = tk.Frame(self.win, bg='#111')
+        f.pack(padx=8, pady=5)
 
-        self.rec_lbl = tk.Label(frame, text='⏺ REC', bg='#1a1a1a', fg='red',
-                                 font=('Consolas', 11, 'bold'))
-        self.rec_lbl.pack(side='left', padx=8)
+        self.lbl = tk.Label(f, text='⏺ REC', bg='#111', fg='red',
+                             font=('Consolas', 11, 'bold'))
+        self.lbl.pack(side='left', padx=6)
 
-        self.btn_pause = tk.Button(frame, text='⏸ 일시정지', command=self._toggle_pause,
-                                    bg='#444', fg='white', relief='flat',
-                                    font=('맑은 고딕', 10, 'bold'), padx=10, pady=5,
-                                    cursor='hand2', bd=0)
-        self.btn_pause.pack(side='left', padx=4)
+        self.btn_p = tk.Button(f, text='⏸ 일시정지', command=self._toggle,
+                                bg='#333', fg='white', relief='flat',
+                                font=('맑은 고딕', 10, 'bold'), padx=10, pady=4,
+                                cursor='hand2', bd=0)
+        self.btn_p.pack(side='left', padx=4)
 
-        tk.Button(frame, text='⏹ 중지', command=on_stop,
-                  bg='#FF4E6A', fg='white', relief='flat',
-                  font=('맑은 고딕', 10, 'bold'), padx=12, pady=5,
+        tk.Button(f, text='⏹ 중지', command=on_stop,
+                  bg='#e74c3c', fg='white', relief='flat',
+                  font=('맑은 고딕', 10, 'bold'), padx=12, pady=4,
                   cursor='hand2', bd=0).pack(side='left', padx=4)
 
-        # 내용에 맞게 창 크기 자동 결정
         self.win.update_idletasks()
-        bw = frame.winfo_reqwidth()  + 20
-        bh = frame.winfo_reqheight() + 12
-        bw = max(bw, 240)
-        bh = max(bh, 40)
+        bw = self.win.winfo_reqwidth()
+        bh = self.win.winfo_reqheight()
+        bx = rl + rw // 2 - bw // 2
+        by = rt - bh - 6
+        if by < 0: by = rt + 4
+        self.win.geometry(f'+{bx}+{by}')
 
-        # region은 물리픽셀 → geometry에 쓸 논리픽셀로 변환
-        try:
-            import ctypes
-            logic_sw = self.win.winfo_screenwidth()
-            phys_sw  = ctypes.windll.user32.GetSystemMetrics(0)
-            dpi = phys_sw / logic_sw if logic_sw > 0 else 1.0
-        except Exception:
-            dpi = 1.0
-
-        l_left  = int(region['left']   / dpi)
-        l_top   = int(region['top']    / dpi)
-        l_width = int(region['width']  / dpi)
-
-        cx = l_left + l_width // 2 - bw // 2
-        cy = l_top - bh - 6
-        if cy < 0: cy = l_top + 4
-        if cx < l_left: cx = l_left
-        if cx + bw > l_left + l_width: cx = l_left + l_width - bw
-
-        self.win.geometry(f'{bw}x{bh}+{cx}+{cy}')
-
-        for w in (frame, self.rec_lbl):
-            w.bind('<ButtonPress-1>', self._drag_start)
-            w.bind('<B1-Motion>',     self._drag_move)
+        for w in (f, self.lbl):
+            w.bind('<ButtonPress-1>', lambda e: setattr(self, '_dx', e.x) or setattr(self, '_dy', e.y))
+            w.bind('<B1-Motion>',     lambda e: self.win.geometry(
+                f'+{self.win.winfo_x()+e.x-self._dx}+{self.win.winfo_y()+e.y-self._dy}'))
         self._dx = self._dy = 0
+
+        # 빨간 테두리
         self._borders = []
-        self._create_border()
-        self._blink_on = True
-        self._blink()
-
-    def _create_border(self):
-        r, b = self.region, 3
-        # region은 물리픽셀 → geometry용 논리픽셀로 변환
-        try:
-            import ctypes
-            logic_sw = tk._default_root.winfo_screenwidth() if tk._default_root else 1920
-            phys_sw  = ctypes.windll.user32.GetSystemMetrics(0)
-            dpi = phys_sw / logic_sw if logic_sw > 0 else 1.0
-        except Exception:
-            dpi = 1.0
-
-        ll = int(r['left']   / dpi)
-        lt = int(r['top']    / dpi)
-        lw = int(r['width']  / dpi)
-        lh = int(r['height'] / dpi)
-        lb = max(int(b / dpi), 1)
-
-        for x, y, w, h in [
-            (ll-lb,    lt-lb,    lw+lb*2, lb),
-            (ll-lb,    lt+lh,    lw+lb*2, lb),
-            (ll-lb,    lt,       lb,      lh),
-            (ll+lw,    lt,       lb,      lh),
-        ]:
+        b = 3
+        ll = rl; lt = rt
+        lw = int(region['width']/d); lh = int(region['height']/d)
+        for bx2,by2,bw2,bh2 in [
+            (ll-b, lt-b, lw+b*2, b), (ll-b, lt+lh, lw+b*2, b),
+            (ll-b, lt,   b,      lh), (ll+lw, lt,   b,      lh)]:
             bwin = tk.Toplevel()
             bwin.overrideredirect(True)
             bwin.attributes('-topmost', True)
-            bwin.geometry(f'{max(w,1)}x{max(h,1)}+{x}+{y}')
+            bwin.geometry(f'{max(bw2,1)}x{max(bh2,1)}+{bx2}+{by2}')
             bwin.configure(bg='red')
             self._borders.append(bwin)
 
+        self._blink_on = True
+        self._blink()
+
     def _blink(self):
         self._blink_on = not self._blink_on
-        c = 'red' if self._blink_on else '#660000'
+        c = 'red' if self._blink_on else '#700'
         try:
-            self.rec_lbl.config(fg=c)
+            self.lbl.config(fg=c)
             for b in self._borders: b.configure(bg=c)
             self.win.after(500, self._blink)
         except Exception: pass
 
-    def _toggle_pause(self):
+    def _toggle(self):
         self.paused = not self.paused
         if self.paused:
-            self.btn_pause.config(text='▶ 재개', bg='#00FFB3', fg='#0e0e14')
-            self.rec_lbl.config(text='⏸ 일시중지', fg='#aaa')
+            self.btn_p.config(text='▶ 재개', bg='#00c896', fg='#000')
+            self.lbl.config(text='⏸ 일시중지', fg='#888')
         else:
-            self.btn_pause.config(text='⏸ 일시정지', bg='#444', fg='white')
-            self.rec_lbl.config(text='⏺ REC', fg='red')
-
-    def _drag_start(self, e): self._dx, self._dy = e.x, e.y
-    def _drag_move(self, e):
-        self.win.geometry(f'+{self.win.winfo_x()+e.x-self._dx}+{self.win.winfo_y()+e.y-self._dy}')
+            self.btn_p.config(text='⏸ 일시정지', bg='#333', fg='white')
+            self.lbl.config(text='⏺ REC', fg='red')
 
     def destroy(self):
         try: self.win.destroy()
@@ -239,682 +176,523 @@ class FloatingControls:
         for b in self._borders:
             try: b.destroy()
             except: pass
-        self._borders.clear()
 
+# ── 프레임 선택 팝업 ──────────────────────────────────────────
+class PickerWindow:
+    TW, TH, COLS = 150, 95, 3
+    BG, CARD, ACC = '#0d0d12', '#1a1a22', '#00ffb3'
+    MUTED, GOLD   = '#555', '#ffd700'
 
-# ──────────────────────────────────────────────────────────────
-# 녹화 엔진
-# ──────────────────────────────────────────────────────────────
-class Recorder:
-    def __init__(self, region, fps, on_frame, get_paused):
-        self.region, self.fps = region, fps
-        self.on_frame, self.get_paused = on_frame, get_paused
-        self.running = False
-
-    def start(self):
-        self.running = True
-        threading.Thread(target=self._loop, daemon=True).start()
-
-    def stop(self): self.running = False
-
-    def _loop(self):
-        interval = 1.0 / self.fps
-        idx = 0
-        with mss.mss() as sct:
-            while self.running:
-                t0 = time.perf_counter()
-                if not self.get_paused():
-                    raw = sct.grab(self.region)
-                    arr = np.frombuffer(raw.raw, dtype=np.uint8).reshape(raw.height, raw.width, 4)
-                    self.on_frame(arr[:, :, [2,1,0]], idx)
-                    idx += 1
-                wait = interval - (time.perf_counter() - t0)
-                if wait > 0: time.sleep(wait)
-
-
-# ──────────────────────────────────────────────────────────────
-# 서브 팝업: 프레임 선택 & 저장
-# ──────────────────────────────────────────────────────────────
-class FramePickerWindow:
-    THUMB_W = 160
-    THUMB_H = 100
-    COLS    = 3
-    BG      = '#0e0e14'
-    PANEL   = '#18181f'
-    CARD    = '#1f1f29'
-    ACCENT  = '#00FFB3'
-    GOLD    = '#FFD700'
-    TEXT    = '#e4e4f0'
-    MUTED   = '#5a5a72'
-    SEL     = '#00FFB3'
-    DESEL   = '#2e2e3e'
-    PREV_BG = '#13131e'
-
-    def __init__(self, parent, frames: list, bookmarks: set):
+    def __init__(self, parent, frames, bookmarks):
         self.frames    = frames
-        self.bookmarks = bookmarks   # 공유 참조 (메인과 동기화)
-        self.selected: set = set()
-        self._refs         = []
-        self._cells: list  = []
-        self._preview_ref  = None
-        self._cur_idx      = -1
-        self.select_mode   = tk.BooleanVar(value=False)
-        self.interval_var  = tk.IntVar(value=5)
+        self.bookmarks = bookmarks
+        self.selected  = set()
+        self._refs     = []
+        self._cells    = []
+        self._cur      = -1
+        self._pref     = None
+        self.sel_mode  = tk.BooleanVar(value=False)
+        self.interval  = tk.IntVar(value=5)
 
         self.win = tk.Toplevel(parent)
         self.win.title('FrameSnap – 프레임 선택 & 저장')
-        self.win.geometry('1100x700')
-        self.win.minsize(800, 500)
+        self.win.geometry('1000x680')
         self.win.configure(bg=self.BG)
-
-        self.win.bind('<Left>',  lambda e: self._prev_nav(-1))
-        self.win.bind('<Right>', lambda e: self._prev_nav(1))
-
+        self.win.bind('<Left>',  lambda e: self._nav(-1))
+        self.win.bind('<Right>', lambda e: self._nav(1))
         self._build()
-        self._load_all_thumbs()
+        self._load()
 
-    def _btn(self, parent, text, cmd, bg=None, fg=None, **kw):
-        return tk.Button(parent, text=text, command=cmd,
-                         bg=bg or self.CARD, fg=fg or self.TEXT,
-                         relief='flat', activebackground=bg or self.CARD,
-                         activeforeground=fg or self.TEXT,
-                         font=('맑은 고딕', 9, 'bold'), padx=10, pady=5,
+    def _btn(self, p, txt, cmd, bg=None, fg='white', **kw):
+        return tk.Button(p, text=txt, command=cmd,
+                         bg=bg or '#2a2a38', fg=fg, relief='flat',
+                         font=('맑은 고딕', 9, 'bold'), padx=9, pady=4,
                          cursor='hand2', bd=0, **kw)
 
     def _build(self):
         # 툴바
-        tools = tk.Frame(self.win, bg='#13131a', height=44)
-        tools.pack(fill='x')
-        tools.pack_propagate(False)
+        tb = tk.Frame(self.win, bg='#111')
+        tb.pack(fill='x', pady=(0,2))
 
-        self.btn_selmode = tk.Button(tools, text='☐ 선택하기',
-                                      command=self._toggle_select_mode,
-                                      bg='#2a2a38', fg=self.TEXT, relief='flat',
-                                      font=('맑은 고딕', 9, 'bold'), padx=12, pady=6,
-                                      cursor='hand2', bd=0)
-        self.btn_selmode.pack(side='left', padx=10, pady=7)
+        self.btn_sel = tk.Button(tb, text='☐ 선택모드',
+                                  command=self._toggle_sel,
+                                  bg='#2a2a38', fg='white', relief='flat',
+                                  font=('맑은 고딕', 9, 'bold'), padx=10, pady=5,
+                                  cursor='hand2', bd=0)
+        self.btn_sel.pack(side='left', padx=8, pady=6)
 
-        tk.Frame(tools, bg='#2e2e3e', width=1).pack(side='left', fill='y', pady=6, padx=4)
+        tk.Label(tb, text='N간격:', bg='#111', fg=self.MUTED,
+                 font=('맑은 고딕', 8)).pack(side='left', padx=(8,2))
+        tk.Spinbox(tb, from_=1, to=100, textvariable=self.interval, width=4,
+                   bg='#252530', fg='white', relief='flat',
+                   font=('Consolas', 9), justify='center').pack(side='left', pady=6)
+        self._btn(tb, '적용', self._apply_interval, bg='#333').pack(side='left', padx=4, pady=6)
 
-        tk.Label(tools, text='N프레임 간격:', bg='#13131a', fg=self.MUTED,
-                 font=('맑은 고딕', 9)).pack(side='left', padx=(10,2))
-        tk.Spinbox(tools, from_=1, to=100, textvariable=self.interval_var, width=4,
-                   bg='#252530', fg=self.TEXT, insertbackground=self.TEXT,
-                   relief='flat', font=('Consolas', 10), justify='center',
-                   buttonbackground='#252530').pack(side='left', pady=8)
-        self._btn(tools, '적용', self._apply_interval, bg='#3a3a50').pack(side='left', padx=6, pady=7)
+        tk.Frame(tb, bg='#333', width=1).pack(side='left', fill='y', pady=4, padx=6)
+        self._btn(tb, '전체선택', self._sel_all, bg='#2a2a38').pack(side='left', padx=3, pady=6)
+        self._btn(tb, '선택해제', self._desel_all, bg='#2a2a38').pack(side='left', padx=3, pady=6)
+        tk.Frame(tb, bg='#333', width=1).pack(side='left', fill='y', pady=4, padx=6)
+        self._btn(tb, '🔖 책갈피 저장', self._save_bm, bg='#3a2e00', fg=self.GOLD).pack(side='left', padx=4, pady=6)
+        self._btn(tb, '💾 선택 저장', self._save_sel, bg=self.ACC, fg='#000').pack(side='right', padx=10, pady=6)
 
-        tk.Frame(tools, bg='#2e2e3e', width=1).pack(side='left', fill='y', pady=6, padx=4)
-        self._btn(tools, '전체 선택', self.select_all, bg='#2a2a38').pack(side='left', padx=4, pady=7)
-        self._btn(tools, '선택 해제', self.deselect_all, bg='#2a2a38').pack(side='left', padx=4, pady=7)
-        tk.Frame(tools, bg='#2e2e3e', width=1).pack(side='left', fill='y', pady=6, padx=4)
-        self._btn(tools, '🔖 책갈피만 저장', self.save_bookmarks,
-                  bg='#3a3010', fg=self.GOLD).pack(side='left', padx=6, pady=7)
-        self._btn(tools, '💾 선택 저장', self.save_selected,
-                  bg=self.ACCENT, fg=self.BG).pack(side='right', padx=14, pady=7)
+        self.stat = tk.StringVar(value='선택모드 OFF | 선택:0 | 책갈피:0')
+        tk.Label(tb, textvariable=self.stat, bg='#111', fg=self.MUTED,
+                 font=('맑은 고딕', 8)).pack(side='right', padx=8)
 
-        self.sel_var = tk.StringVar(value='선택 모드 OFF  |  선택: 0개  |  책갈피: 0개')
-        tk.Label(tools, textvariable=self.sel_var, bg='#13131a', fg=self.MUTED,
-                 font=('맑은 고딕', 8)).pack(side='right', padx=10)
-
-        # 메인: 좌(썸네일) + 우(미리보기)
+        # 메인 영역
         main = tk.Frame(self.win, bg=self.BG)
         main.pack(fill='both', expand=True)
 
-        # 좌측 썸네일
-        left = tk.Frame(main, bg=self.BG, width=430)
+        # 좌: 썸네일
+        left = tk.Frame(main, bg=self.BG, width=380)
         left.pack(side='left', fill='both')
         left.pack_propagate(False)
-
-        self.gc = tk.Canvas(left, bg=self.BG, highlightthickness=0)
-        vsb = ttk.Scrollbar(left, orient='vertical', command=self.gc.yview)
-        self.gc.configure(yscrollcommand=vsb.set)
+        gc = tk.Canvas(left, bg=self.BG, highlightthickness=0)
+        vsb = ttk.Scrollbar(left, orient='vertical', command=gc.yview)
+        gc.configure(yscrollcommand=vsb.set)
         vsb.pack(side='right', fill='y')
-        self.gc.pack(fill='both', expand=True)
-        self.gf = tk.Frame(self.gc, bg=self.BG)
-        self._gw = self.gc.create_window((0,0), window=self.gf, anchor='nw')
-        self.gf.bind('<Configure>', lambda e: self.gc.configure(scrollregion=self.gc.bbox('all')))
-        self.gc.bind('<Configure>', lambda e: self.gc.itemconfig(self._gw, width=e.width))
-        self.gc.bind_all('<MouseWheel>', lambda e: self.gc.yview_scroll(int(-e.delta/120), 'units'))
+        gc.pack(fill='both', expand=True)
+        self.gf = tk.Frame(gc, bg=self.BG)
+        gw = gc.create_window((0,0), window=self.gf, anchor='nw')
+        self.gf.bind('<Configure>', lambda e: gc.configure(scrollregion=gc.bbox('all')))
+        gc.bind('<Configure>', lambda e: gc.itemconfig(gw, width=e.width))
+        gc.bind_all('<MouseWheel>', lambda e: gc.yview_scroll(int(-e.delta/120), 'units'))
 
-        self.empty_lbl = tk.Label(self.gf, text='프레임 로딩 중...',
-                                   bg=self.BG, fg=self.MUTED, font=('맑은 고딕', 11))
-        self.empty_lbl.grid(row=0, column=0, columnspan=self.COLS, pady=60)
-
-        # 우측 미리보기
-        right = tk.Frame(main, bg=self.PREV_BG)
+        # 우: 미리보기
+        right = tk.Frame(main, bg='#0a0a10')
         right.pack(side='left', fill='both', expand=True)
+        pt = tk.Frame(right, bg='#111', height=36)
+        pt.pack(fill='x')
+        pt.pack_propagate(False)
+        tk.Label(pt, text='미리보기', bg='#111', fg=self.MUTED,
+                 font=('맑은 고딕', 9, 'bold')).pack(side='left', padx=12, pady=8)
+        self.ptitle = tk.Label(pt, text='', bg='#111', fg=self.ACC,
+                                font=('Consolas', 9, 'bold'))
+        self.ptitle.pack(side='left')
+        self.bm_btn = tk.Button(pt, text='🔖', command=self._toggle_bm,
+                                 bg='#111', fg=self.MUTED, relief='flat',
+                                 font=('Consolas', 13), padx=5, cursor='hand2', bd=0)
+        self.bm_btn.pack(side='left', padx=4)
+        nf = tk.Frame(pt, bg='#111')
+        nf.pack(side='right', padx=6)
+        for txt, d in [('◀', -1), ('▶', 1)]:
+            tk.Button(nf, text=txt, command=lambda x=d: self._nav(x),
+                      bg='#2a2a38', fg='white', relief='flat',
+                      font=('Consolas', 10), padx=7, pady=2,
+                      cursor='hand2', bd=0).pack(side='left', padx=2)
+        self.pcanvas = tk.Canvas(right, bg='#0a0a10', highlightthickness=0)
+        self.pcanvas.pack(fill='both', expand=True, padx=8, pady=8)
+        self.pcanvas.bind('<Configure>', lambda e: self._show_preview(self._cur))
+        self.phint = tk.Label(right, text='썸네일을 클릭하면\n크게 표시됩니다',
+                               bg='#0a0a10', fg=self.MUTED, font=('맑은 고딕', 11))
+        self.phint.place(relx=0.5, rely=0.5, anchor='center')
 
-        prev_top = tk.Frame(right, bg='#1a1a28', height=40)
-        prev_top.pack(fill='x')
-        prev_top.pack_propagate(False)
-        tk.Label(prev_top, text='미리보기', bg='#1a1a28', fg=self.MUTED,
-                 font=('맑은 고딕', 9, 'bold')).pack(side='left', padx=14, pady=10)
-        self.prev_title = tk.Label(prev_top, text='', bg='#1a1a28', fg=self.ACCENT,
-                                    font=('Consolas', 9, 'bold'))
-        self.prev_title.pack(side='left')
-        self.btn_bm = tk.Button(prev_top, text='🔖', command=self._toggle_bookmark_current,
-                                 bg='#1a1a28', fg=self.MUTED, relief='flat',
-                                 font=('Consolas', 14), padx=6, cursor='hand2', bd=0)
-        self.btn_bm.pack(side='left', padx=6)
+    def _load(self):
+        for i, rgb in enumerate(self.frames):
+            img = Image.fromarray(rgb)
+            img.thumbnail((self.TW, self.TH), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            self._refs.append(photo)
+            row, col = divmod(i, self.COLS)
+            cell = tk.Frame(self.gf, bg=self.CARD,
+                             highlightthickness=2, highlightbackground='#2a2a38',
+                             cursor='hand2')
+            cell.grid(row=row, column=col, padx=4, pady=4, sticky='nsew')
+            tk.Label(cell, image=photo, bg=self.CARD).pack()
+            bf = tk.Frame(cell, bg=self.CARD)
+            bf.pack(fill='x', pady=1)
+            tk.Label(bf, text=f'#{i+1}', bg=self.CARD, fg=self.MUTED,
+                      font=('Consolas', 7)).pack(side='left', padx=4)
+            bml = tk.Label(bf, text='🔖' if i in self.bookmarks else '',
+                            bg=self.CARD, fg=self.GOLD, font=('Consolas', 8))
+            bml.pack(side='right', padx=3)
+            self._cells.append((cell, bml))
+            for w in cell.winfo_children() + [cell]:
+                w.bind('<Button-1>', lambda e, idx=i: self._click(idx))
 
-        nav_f = tk.Frame(prev_top, bg='#1a1a28')
-        nav_f.pack(side='right', padx=8)
-        tk.Button(nav_f, text='◀', command=lambda: self._prev_nav(-1),
-                  bg='#2e2e3e', fg='white', relief='flat', font=('Consolas', 10),
-                  padx=8, pady=3, cursor='hand2', bd=0).pack(side='left', padx=2)
-        tk.Button(nav_f, text='▶', command=lambda: self._prev_nav(1),
-                  bg='#2e2e3e', fg='white', relief='flat', font=('Consolas', 10),
-                  padx=8, pady=3, cursor='hand2', bd=0).pack(side='left', padx=2)
+    def _click(self, i):
+        self._show_preview(i)
+        if self.sel_mode.get():
+            if i in self.selected:
+                self.selected.discard(i)
+                self._cells[i][0].config(highlightbackground='#2a2a38')
+            else:
+                self.selected.add(i)
+                self._cells[i][0].config(highlightbackground=self.ACC)
+            self._update_stat()
 
-        self.prev_canvas = tk.Canvas(right, bg=self.PREV_BG, highlightthickness=0)
-        self.prev_canvas.pack(fill='both', expand=True, padx=10, pady=10)
-        self.prev_canvas.bind('<Configure>', lambda e: self._show_preview(self._cur_idx))
+    def _show_preview(self, i):
+        if i < 0 or i >= len(self.frames): return
+        self._cur = i
+        self.phint.place_forget()
+        img = Image.fromarray(self.frames[i])
+        self.pcanvas.update_idletasks()
+        cw = max(self.pcanvas.winfo_width()-10, 50)
+        ch = max(self.pcanvas.winfo_height()-10, 50)
+        iw, ih = img.size
+        scale = min(cw/iw, ch/ih)
+        img = img.resize((max(int(iw*scale),1), max(int(ih*scale),1)), Image.LANCZOS)
+        self._pref = ImageTk.PhotoImage(img)
+        self.pcanvas.delete('all')
+        self.pcanvas.create_image(cw//2+5, ch//2+5, image=self._pref, anchor='center')
+        self.ptitle.config(text=f'#{i+1} / {len(self.frames)}')
+        self.bm_btn.config(fg=self.GOLD if i in self.bookmarks else self.MUTED)
 
-        self.prev_hint = tk.Label(right,
-                                   text='썸네일을 클릭하면\n여기에 크게 표시됩니다.\n\n← → 키로 이동',
-                                   bg=self.PREV_BG, fg=self.MUTED, font=('맑은 고딕', 11))
-        self.prev_hint.place(relx=0.5, rely=0.5, anchor='center')
+    def _nav(self, d):
+        n = self._cur + d
+        if 0 <= n < len(self.frames): self._show_preview(n)
 
-    def _load_all_thumbs(self):
-        """열릴 때 전체 썸네일 한 번에 로드"""
-        if self.empty_lbl.winfo_ismapped():
-            self.empty_lbl.grid_forget()
-        for idx, rgb in enumerate(self.frames):
-            self._add_thumb(rgb, idx)
-
-    def _add_thumb(self, rgb, idx):
-        img = Image.fromarray(rgb)
-        img.thumbnail((self.THUMB_W, self.THUMB_H), Image.LANCZOS)
-        photo = ImageTk.PhotoImage(img)
-        self._refs.append(photo)
-        row, col = divmod(idx, self.COLS)
-        cell = tk.Frame(self.gf, bg=self.CARD,
-                         highlightthickness=2, highlightbackground=self.DESEL,
-                         cursor='hand2')
-        cell.grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
-        il = tk.Label(cell, image=photo, bg=self.CARD)
-        il.pack()
-        bot = tk.Frame(cell, bg=self.CARD)
-        bot.pack(fill='x', pady=2)
-        tk.Label(bot, text=f'#{idx+1}', bg=self.CARD, fg=self.MUTED,
-                  font=('Consolas', 8)).pack(side='left', padx=6)
-        # 이미 책갈피면 아이콘 표시
-        bm_text = '🔖' if idx in self.bookmarks else ''
-        bm_lbl = tk.Label(bot, text=bm_text, bg=self.CARD, fg=self.GOLD, font=('Consolas', 9))
-        bm_lbl.pack(side='right', padx=4)
-        self._cells.append((cell, bm_lbl))
-        for w in (cell, il, bot, bm_lbl):
-            w.bind('<Button-1>', lambda e, i=idx: self._click_frame(i))
-
-    def _toggle_select_mode(self):
-        self.select_mode.set(not self.select_mode.get())
-        if self.select_mode.get():
-            self.btn_selmode.config(text='☑ 선택하기 ON', bg=self.ACCENT, fg=self.BG)
+    def _toggle_sel(self):
+        self.sel_mode.set(not self.sel_mode.get())
+        if self.sel_mode.get():
+            self.btn_sel.config(text='☑ 선택모드 ON', bg=self.ACC, fg='#000')
         else:
-            self.btn_selmode.config(text='☐ 선택하기', bg='#2a2a38', fg=self.TEXT)
-        self._update_status()
+            self.btn_sel.config(text='☐ 선택모드', bg='#2a2a38', fg='white')
+        self._update_stat()
+
+    def _toggle_bm(self):
+        i = self._cur
+        if i < 0 or i >= len(self.frames): return
+        if i in self.bookmarks:
+            self.bookmarks.discard(i)
+            self._cells[i][1].config(text='')
+            self.bm_btn.config(fg=self.MUTED)
+        else:
+            self.bookmarks.add(i)
+            self._cells[i][1].config(text='🔖', fg=self.GOLD)
+            self.bm_btn.config(fg=self.GOLD)
+        self._update_stat()
 
     def _apply_interval(self):
-        if not self.frames:
-            messagebox.showwarning('알림', '프레임이 없습니다.')
-            return
-        n = max(1, self.interval_var.get())
+        if not self.frames: return
+        n = max(1, self.interval.get())
         total = len(self.frames)
         self.selected.clear()
-        for c, _ in self._cells: c.config(highlightbackground=self.DESEL)
+        for c, _ in self._cells: c.config(highlightbackground='#2a2a38')
         targets = set(range(0, total, n))
         targets.add(total - 1)
         for i in targets:
             self.selected.add(i)
-            if i < len(self._cells):
-                self._cells[i][0].config(highlightbackground=self.SEL)
-        self._update_status()
-        messagebox.showinfo('간격 선택', f'{n}프레임 간격으로 {len(targets)}개 선택됨\n(마지막 프레임 #{total} 포함)')
+            self._cells[i][0].config(highlightbackground=self.ACC)
+        self._update_stat()
+        messagebox.showinfo('간격 선택', f'{n}프레임 간격 → {len(targets)}개 선택 (마지막 포함)')
 
-    def _click_frame(self, idx):
-        self._show_preview(idx)
-        if self.select_mode.get():
-            if idx in self.selected:
-                self.selected.discard(idx)
-                self._cells[idx][0].config(highlightbackground=self.DESEL)
-            else:
-                self.selected.add(idx)
-                self._cells[idx][0].config(highlightbackground=self.SEL)
-            self._update_status()
-
-    def _toggle_bookmark_current(self):
-        idx = self._cur_idx
-        if idx < 0 or idx >= len(self.frames): return
-        if idx in self.bookmarks:
-            self.bookmarks.discard(idx)
-            if idx < len(self._cells): self._cells[idx][1].config(text='')
-            self.btn_bm.config(fg=self.MUTED)
-        else:
-            self.bookmarks.add(idx)
-            if idx < len(self._cells): self._cells[idx][1].config(text='🔖', fg=self.GOLD)
-            self.btn_bm.config(fg=self.GOLD)
-        self._update_status()
-
-    def _update_status(self):
-        mode = '선택 모드 ON ' if self.select_mode.get() else '선택 모드 OFF'
-        self.sel_var.set(f'{mode}  |  선택: {len(self.selected)}개  |  책갈피: {len(self.bookmarks)}개')
-
-    def _show_preview(self, idx):
-        if idx < 0 or idx >= len(self.frames): return
-        self._cur_idx = idx
-        self.prev_hint.place_forget()
-        rgb = self.frames[idx]
-        img = Image.fromarray(rgb)
-        self.prev_canvas.update_idletasks()
-        cw = max(self.prev_canvas.winfo_width() - 20, 100)
-        ch = max(self.prev_canvas.winfo_height() - 20, 100)
-        iw, ih = img.size
-        # 창 크기에 맞게 확대/축소 모두 허용
-        scale = min(cw / iw, ch / ih)
-        nw = max(int(iw * scale), 1)
-        nh = max(int(ih * scale), 1)
-        img = img.resize((nw, nh), Image.LANCZOS)
-        self._preview_ref = ImageTk.PhotoImage(img)
-        self.prev_canvas.delete('all')
-        self.prev_canvas.create_image(cw // 2 + 10, ch // 2 + 10, image=self._preview_ref, anchor='center')
-        self.prev_title.config(text=f'#{idx+1} / {len(self.frames)}')
-        self.btn_bm.config(fg=self.GOLD if idx in self.bookmarks else self.MUTED)
-
-    def _prev_nav(self, d):
-        new = self._cur_idx + d
-        if 0 <= new < len(self.frames):
-            self._show_preview(new)
-
-    def select_all(self):
+    def _sel_all(self):
         for i in range(len(self.frames)):
             self.selected.add(i)
-            if i < len(self._cells): self._cells[i][0].config(highlightbackground=self.SEL)
-        self._update_status()
+            self._cells[i][0].config(highlightbackground=self.ACC)
+        self._update_stat()
 
-    def deselect_all(self):
+    def _desel_all(self):
         self.selected.clear()
-        for c, _ in self._cells: c.config(highlightbackground=self.DESEL)
-        self._update_status()
+        for c, _ in self._cells: c.config(highlightbackground='#2a2a38')
+        self._update_stat()
 
-    def save_selected(self):
-        if not self.selected:
-            messagebox.showwarning('알림', '선택된 프레임이 없습니다.\n선택하기 버튼을 켜고 프레임을 선택하세요.')
-            return
-        self._save_frames(sorted(self.selected), '선택')
+    def _update_stat(self):
+        m = 'ON' if self.sel_mode.get() else 'OFF'
+        self.stat.set(f'선택모드 {m} | 선택:{len(self.selected)} | 책갈피:{len(self.bookmarks)}')
 
-    def save_bookmarks(self):
-        if not self.bookmarks:
-            messagebox.showwarning('알림', '책갈피된 프레임이 없습니다.\n🔖 버튼으로 책갈피를 추가하세요.')
-            return
-        self._save_frames(sorted(self.bookmarks), '책갈피')
-
-    def _save_frames(self, indices, label):
-        folder = filedialog.askdirectory(title='저장 폴더 선택')
+    def _save(self, indices, label):
+        folder = filedialog.askdirectory(title='저장 폴더')
         if not folder: return
-        saved = 0
-        for idx in indices:
-            if idx < len(self.frames):
-                Image.fromarray(self.frames[idx]).save(
-                    os.path.join(folder, f'frame_{idx+1:04d}.png'))
-                saved += 1
-        messagebox.showinfo('저장 완료', f'✅ {label} {saved}개 저장 완료\n\n📁 {folder}')
+        saved = sum(1 for i in indices if i < len(self.frames) and
+                    not Image.fromarray(self.frames[i]).save(
+                        os.path.join(folder, f'frame_{i+1:04d}.png')))
+        messagebox.showinfo('저장 완료', f'✅ {label} {saved}개 저장\n📁 {folder}')
 
+    def _save_sel(self):
+        if not self.selected:
+            messagebox.showwarning('알림', '선택된 프레임이 없습니다.')
+            return
+        self._save(sorted(self.selected), '선택')
 
-# ──────────────────────────────────────────────────────────────
-# 메인 앱 = 영상 재생 화면
-# ──────────────────────────────────────────────────────────────
+    def _save_bm(self):
+        if not self.bookmarks:
+            messagebox.showwarning('알림', '책갈피된 프레임이 없습니다.')
+            return
+        self._save(sorted(self.bookmarks), '책갈피')
+
+# ── 메인 앱 (재생 화면) ───────────────────────────────────────
 class App:
-    BG    = '#0e0e14'
-    PANEL = '#18181f'
-    CARD  = '#1f1f29'
-    ACCENT= '#00FFB3'
-    RED   = '#FF4E6A'
-    GOLD  = '#FFD700'
-    TEXT  = '#e4e4f0'
-    MUTED = '#5a5a72'
+    BG    = '#0d0d12'
+    PANEL = '#16161e'
+    ACC   = '#00ffb3'
+    RED   = '#e74c3c'
+    GOLD  = '#ffd700'
+    TEXT  = '#e0e0ee'
+    MUTED = '#505060'
 
     def __init__(self):
         self.root = tk.Tk()
         self.root.title('FrameSnap')
-        self.root.geometry('1600x1000')
-        self.root.minsize(800, 560)
         self.root.configure(bg=self.BG)
-        # 시작 시 최대화
         self.root.state('zoomed')
+        self.root.minsize(700, 500)
 
-        self.recorder:   Recorder | None         = None
-        self.float_ctrl: FloatingControls | None = None
-        self.region:     dict | None             = None
-        self.fps_var     = tk.IntVar(value=5)
-        self.delay_var   = tk.BooleanVar(value=True)
+        self.dpi       = 1.0   # 앱 시작 후 계산
+        self.recorder  = None
+        self.recbar    = None
+        self.region    = None
+        self.fps_var   = tk.IntVar(value=5)
+        self.delay_var = tk.BooleanVar(value=True)
+        self.frames    = []
+        self.bookmarks = set()
+        self.idx       = 0
+        self.playing   = False
+        self.speed     = 1.0
+        self._aid      = None
+        self._ref      = None
         self.auto_folder  = tk.StringVar(value='')
         self.filename_var = tk.StringVar(value='screenshot')
-
-        self.frames:    list = []
-        self.bookmarks: set  = set()   # FramePicker와 공유
-        self._ref            = None
-        self.idx             = 0
-        self.playing         = False
-        self.speed           = 1.0
-        self._after_id       = None
-        self.screenshot_count = 0
+        self.shot_count   = 0
 
         self._build()
-        if not MSS_AVAILABLE:
-            messagebox.showerror('패키지 누락', 'pip install mss 후 다시 실행하세요.')
+        # DPI는 창이 뜬 후 계산
+        self.root.after(100, self._init_dpi)
 
-    def _btn(self, parent, text, cmd, bg=None, fg=None, state='normal', **kw):
-        return tk.Button(parent, text=text, command=cmd,
-                         bg=bg or self.CARD, fg=fg or self.TEXT,
-                         relief='flat', activebackground=bg or self.CARD,
-                         activeforeground=fg or self.TEXT,
-                         font=('맑은 고딕', 9, 'bold'), padx=10, pady=5,
-                         cursor='hand2', state=state, bd=0, **kw)
+        if not HAS_MSS:
+            messagebox.showerror('오류', 'pip install mss 후 재실행하세요.')
+
+    def _init_dpi(self):
+        self.dpi = get_dpi_scale(self.root)
+
+    def _btn(self, p, txt, cmd, bg=None, fg=None, **kw):
+        return tk.Button(p, text=txt, command=cmd,
+                         bg=bg or '#2a2a38', fg=fg or self.TEXT,
+                         relief='flat', activebackground=bg or '#2a2a38',
+                         font=('맑은 고딕', 9, 'bold'), padx=9, pady=5,
+                         cursor='hand2', bd=0, **kw)
 
     def _build(self):
         # ── 탑바
-        bar = tk.Frame(self.root, bg=self.PANEL)
-        bar.pack(fill='x')
+        top = tk.Frame(self.root, bg=self.PANEL)
+        top.pack(fill='x')
 
-        tk.Label(bar, text='⬛ FrameSnap', bg=self.PANEL, fg=self.ACCENT,
-                 font=('Consolas', 12, 'bold')).pack(side='left', padx=12, pady=8)
+        tk.Label(top, text='⬛ FrameSnap', bg=self.PANEL, fg=self.ACC,
+                 font=('Consolas', 13, 'bold')).pack(side='left', padx=14, pady=8)
 
-        fps_f = tk.Frame(bar, bg=self.PANEL)
-        fps_f.pack(side='left', padx=4)
-        tk.Label(fps_f, text='FPS', bg=self.PANEL, fg=self.MUTED,
+        ff = tk.Frame(top, bg=self.PANEL)
+        ff.pack(side='left', padx=4)
+        tk.Label(ff, text='FPS', bg=self.PANEL, fg=self.MUTED,
                  font=('Consolas', 8)).pack(side='left')
-        tk.Spinbox(fps_f, from_=1, to=30, textvariable=self.fps_var, width=3,
+        tk.Spinbox(ff, from_=1, to=30, textvariable=self.fps_var, width=3,
                    bg='#252530', fg=self.TEXT, insertbackground=self.TEXT,
                    relief='flat', font=('Consolas', 10), justify='center',
                    buttonbackground='#252530').pack(side='left', padx=4)
 
-        tk.Checkbutton(bar, text='3초 후 시작', variable=self.delay_var,
+        tk.Checkbutton(top, text='3초 후 시작', variable=self.delay_var,
                        bg=self.PANEL, fg=self.TEXT, selectcolor='#252530',
-                       activebackground=self.PANEL, font=('맑은 고딕', 8),
-                       cursor='hand2').pack(side='left', padx=8)
+                       activebackground=self.PANEL,
+                       font=('맑은 고딕', 8), cursor='hand2').pack(side='left', padx=8)
 
-        self._btn(bar, '🗑 초기화', self.clear_all).pack(side='right', padx=4, pady=6)
-        self._btn(bar, '🖼 프레임 저장', self._open_picker,
-                  bg='#2a2a50').pack(side='right', padx=4, pady=6)
-        self.btn_start = self._btn(bar, '⏺ 영역 선택 후 녹화', self.start_recording,
-                                    bg=self.ACCENT, fg=self.BG)
-        self.btn_start.pack(side='right', padx=4, pady=6)
+        self._btn(top, '🗑 초기화', self.clear_all).pack(side='right', padx=6, pady=7)
+        self._btn(top, '🖼 프레임 저장', self._open_picker,
+                  bg='#252545').pack(side='right', padx=4, pady=7)
+        self.btn_rec = self._btn(top, '⏺ 영역 선택 후 녹화', self.start_recording,
+                                  bg=self.ACC, fg='#000')
+        self.btn_rec.pack(side='right', padx=4, pady=7)
 
         # ── 상태바
-        sbar = tk.Frame(self.root, bg='#111118', height=22)
-        sbar.pack(fill='x')
-        sbar.pack_propagate(False)
-        self.status_var = tk.StringVar(value='준비됨  –  영역 선택 후 녹화 버튼을 누르세요')
-        self.cnt_var    = tk.StringVar(value='프레임 0')
-        tk.Label(sbar, textvariable=self.status_var, bg='#111118', fg=self.MUTED,
+        sb = tk.Frame(self.root, bg='#0a0a0f', height=22)
+        sb.pack(fill='x')
+        sb.pack_propagate(False)
+        self.stat_var = tk.StringVar(value='준비됨 – 영역 선택 후 녹화 버튼을 누르세요')
+        self.cnt_var  = tk.StringVar(value='프레임 0')
+        tk.Label(sb, textvariable=self.stat_var, bg='#0a0a0f', fg=self.MUTED,
                  font=('Consolas', 8)).pack(side='left', padx=10)
-        tk.Label(sbar, textvariable=self.cnt_var, bg='#111118', fg=self.ACCENT,
+        tk.Label(sb, textvariable=self.cnt_var, bg='#0a0a0f', fg=self.ACC,
                  font=('Consolas', 8, 'bold')).pack(side='right', padx=10)
 
-        # ── 영상 캔버스
-        self.canvas = tk.Canvas(self.root, bg='#080810', highlightthickness=0)
+        # ── 재생 캔버스
+        self.canvas = tk.Canvas(self.root, bg='#08080e', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True, padx=6, pady=(4,0))
-        self.canvas.bind('<Configure>', self._on_canvas_resize)
+        self.canvas.bind('<Configure>', self._on_resize)
 
         # ── 진행바
-        bar_f = tk.Frame(self.root, bg=self.BG)
-        bar_f.pack(fill='x', padx=6, pady=(4,2))
+        pf = tk.Frame(self.root, bg=self.BG)
+        pf.pack(fill='x', padx=6, pady=(3,1))
         style = ttk.Style()
         style.theme_use('clam')
-        style.configure('Big.Horizontal.TScale', troughcolor='#2a2a38',
-                         sliderthickness=18, sliderrelief='flat')
-        self.progress = ttk.Scale(bar_f, from_=0, to=1, orient='horizontal',
-                                   style='Big.Horizontal.TScale')
-        self.progress.pack(fill='x', ipady=4)
-        self.progress.bind('<ButtonRelease-1>', self._on_seek)
-        self.progress.bind('<B1-Motion>',       self._on_seek)
+        style.configure('FS.Horizontal.TScale', troughcolor='#252530',
+                         sliderthickness=16)
+        self.progress = ttk.Scale(pf, from_=0, to=1, orient='horizontal',
+                                   style='FS.Horizontal.TScale')
+        self.progress.pack(fill='x', ipady=3)
+        self.progress.bind('<ButtonRelease-1>', self._seek)
+        self.progress.bind('<B1-Motion>',       self._seek)
 
-        # 프레임 정보
-        info_f = tk.Frame(self.root, bg=self.BG)
-        info_f.pack(fill='x', padx=10)
-        self.frame_lbl = tk.Label(info_f, text='녹화 후 재생 가능합니다',
-                                   bg=self.BG, fg=self.MUTED, font=('맑은 고딕', 9))
-        self.frame_lbl.pack(side='left')
-        self.shot_lbl = tk.Label(info_f, text='', bg=self.BG, fg=self.GOLD,
-                                  font=('맑은 고딕', 9, 'bold'))
+        info = tk.Frame(self.root, bg=self.BG)
+        info.pack(fill='x', padx=10)
+        self.frm_lbl = tk.Label(info, text='녹화 후 재생 가능합니다',
+                                  bg=self.BG, fg=self.MUTED, font=('맑은 고딕', 8))
+        self.frm_lbl.pack(side='left')
+        self.shot_lbl = tk.Label(info, text='', bg=self.BG, fg=self.GOLD,
+                                  font=('맑은 고딕', 8, 'bold'))
         self.shot_lbl.pack(side='right')
 
-        # ── 재생 컨트롤 바
+        # ── 컨트롤 바
         ctrl = tk.Frame(self.root, bg=self.PANEL)
         ctrl.pack(fill='x', pady=(2,0))
 
-        # 속도
-        spd_f = tk.Frame(ctrl, bg=self.PANEL)
-        spd_f.pack(side='left', padx=10, pady=6)
-        tk.Label(spd_f, text='속도', bg=self.PANEL, fg=self.MUTED,
+        sf = tk.Frame(ctrl, bg=self.PANEL)
+        sf.pack(side='left', padx=10, pady=7)
+        tk.Label(sf, text='속도', bg=self.PANEL, fg=self.MUTED,
                  font=('맑은 고딕', 8)).pack(side='left', padx=(0,4))
-        for spd, lbl in [(0.25,'¼x'),(0.5,'½x'),(1.0,'1x'),(2.0,'2x'),(4.0,'4x')]:
-            tk.Button(spd_f, text=lbl, command=lambda s=spd: self._set_speed(s),
+        for s, lbl in [(0.25,'¼x'),(0.5,'½x'),(1.0,'1x'),(2.0,'2x'),(4.0,'4x')]:
+            tk.Button(sf, text=lbl, command=lambda x=s: setattr(self,'speed',x),
                       bg='#2a2a38', fg=self.TEXT, relief='flat',
-                      font=('Consolas', 9, 'bold'), padx=8, pady=4,
+                      font=('Consolas', 9, 'bold'), padx=8, pady=3,
                       cursor='hand2', bd=0).pack(side='left', padx=2)
 
-        # 재생 버튼
-        play_f = tk.Frame(ctrl, bg=self.PANEL)
-        play_f.pack(side='left', padx=12, pady=6)
+        pf2 = tk.Frame(ctrl, bg=self.PANEL)
+        pf2.pack(side='left', padx=10, pady=5)
         for txt, cmd in [('⏮', lambda: self._jump(0)),
                           ('◀◀', lambda: self._step(-10)),
                           ('◀',  lambda: self._step(-1))]:
-            tk.Button(play_f, text=txt, command=cmd,
+            tk.Button(pf2, text=txt, command=cmd,
                       bg='#2a2a38', fg=self.TEXT, relief='flat',
-                      font=('Consolas', 12), padx=8, pady=5,
+                      font=('Consolas', 12), padx=8, pady=4,
                       cursor='hand2', bd=0).pack(side='left', padx=2)
 
-        self.btn_play = tk.Button(play_f, text='▶ 재생', command=self._toggle_play,
-                                   bg=self.ACCENT, fg=self.BG, relief='flat',
-                                   font=('맑은 고딕', 10, 'bold'), padx=14, pady=6,
+        self.btn_play = tk.Button(pf2, text='▶ 재생', command=self._toggle_play,
+                                   bg=self.ACC, fg='#000', relief='flat',
+                                   font=('맑은 고딕', 11, 'bold'), padx=14, pady=6,
                                    cursor='hand2', bd=0)
-        self.btn_play.pack(side='left', padx=5)
+        self.btn_play.pack(side='left', padx=6)
 
-        for txt, cmd in [('▶',  lambda: self._step(1)),
+        for txt, cmd in [('▶', lambda: self._step(1)),
                           ('▶▶', lambda: self._step(10)),
-                          ('⏭', lambda: self._jump_end())]:
-            tk.Button(play_f, text=txt, command=cmd,
+                          ('⏭', lambda: self._jump(-1))]:
+            tk.Button(pf2, text=txt, command=cmd,
                       bg='#2a2a38', fg=self.TEXT, relief='flat',
-                      font=('Consolas', 12), padx=8, pady=5,
+                      font=('Consolas', 12), padx=8, pady=4,
                       cursor='hand2', bd=0).pack(side='left', padx=2)
 
         # 저장 설정 + 스크린샷
-        right_f = tk.Frame(ctrl, bg=self.PANEL)
-        right_f.pack(side='right', padx=10, pady=4)
+        rf = tk.Frame(ctrl, bg=self.PANEL)
+        rf.pack(side='right', padx=10, pady=5)
 
-        cfg_f = tk.Frame(right_f, bg=self.PANEL)
-        cfg_f.pack(side='top', anchor='e')
-
-        tk.Label(cfg_f, text='📁', bg=self.PANEL, fg=self.MUTED,
-                 font=('맑은 고딕', 9)).grid(row=0, column=0, sticky='e', padx=(0,2), pady=1)
-        self.folder_lbl = tk.Label(cfg_f, textvariable=self.auto_folder,
-                                    bg='#252530', fg=self.TEXT,
-                                    font=('Consolas', 8), width=18, anchor='w', padx=3)
-        self.folder_lbl.grid(row=0, column=1, pady=1)
-        tk.Button(cfg_f, text='변경', command=self._change_folder,
-                  bg='#3a3a50', fg=self.TEXT, relief='flat',
-                  font=('맑은 고딕', 8), padx=6, pady=1,
-                  cursor='hand2', bd=0).grid(row=0, column=2, padx=(3,0), pady=1)
-
-        tk.Label(cfg_f, text='📄', bg=self.PANEL, fg=self.MUTED,
-                 font=('맑은 고딕', 9)).grid(row=1, column=0, sticky='e', padx=(0,2), pady=1)
-        self.filename_var = tk.StringVar(value='screenshot')
-        fn_entry = tk.Entry(cfg_f, textvariable=self.filename_var,
+        cf = tk.Frame(rf, bg=self.PANEL)
+        cf.pack(side='top', anchor='e')
+        tk.Label(cf, text='📁', bg=self.PANEL, fg=self.MUTED,
+                 font=('맑은 고딕', 8)).grid(row=0, column=0, sticky='e', padx=(0,2))
+        tk.Label(cf, textvariable=self.auto_folder, bg='#252530', fg=self.TEXT,
+                 font=('Consolas', 8), width=16, anchor='w', padx=3
+                 ).grid(row=0, column=1)
+        self._btn(cf, '변경', self._chg_folder, bg='#333').grid(row=0, column=2, padx=(3,0))
+        tk.Label(cf, text='📄', bg=self.PANEL, fg=self.MUTED,
+                 font=('맑은 고딕', 8)).grid(row=1, column=0, sticky='e', padx=(0,2), pady=2)
+        fn_entry = tk.Entry(cf, textvariable=self.filename_var,
                             bg='#252530', fg=self.TEXT, insertbackground=self.TEXT,
-                            relief='flat', font=('Consolas', 8), width=18)
-        fn_entry.grid(row=1, column=1, pady=1, ipady=2)
-        tk.Label(cfg_f, text='_0001.png', bg=self.PANEL, fg=self.MUTED,
-                 font=('Consolas', 8)).grid(row=1, column=2, padx=(3,0), pady=1, sticky='w')
+                            relief='flat', font=('Consolas', 8), width=16)
+        fn_entry.grid(row=1, column=1, pady=2, ipady=2)
+        tk.Label(cf, text='_0001.png', bg=self.PANEL, fg=self.MUTED,
+                 font=('Consolas', 8)).grid(row=1, column=2, padx=(3,0), sticky='w')
 
-        tk.Button(right_f, text='📸 스크린샷 [S]',
-                  command=self._take_screenshot,
+        tk.Button(rf, text='📸 스크린샷 [S]', command=self._screenshot,
                   bg=self.RED, fg='white', relief='flat',
                   font=('맑은 고딕', 10, 'bold'), padx=12, pady=5,
                   cursor='hand2', bd=0).pack(side='bottom', pady=(3,0))
 
-        # ── 키 바인딩 (Entry 포커스 시 무시, canvas 클릭 후 포커스 복구)
+        # 키 바인딩
+        def guard(fn):
+            def h(e):
+                if isinstance(e.widget, (tk.Entry, tk.Spinbox)): return
+                fn()
+            return h
+        self.root.bind('<space>', guard(self._toggle_play))
+        self.root.bind('<Left>',  guard(lambda: self._step(-1)))
+        self.root.bind('<Right>', guard(lambda: self._step(1)))
+        self.root.bind('<s>',     guard(self._screenshot))
+        self.root.bind('<S>',     guard(self._screenshot))
         self.canvas.bind('<Button-1>', lambda e: self.root.focus_set())
 
-        def _key_guard(fn):
-            def handler(e):
-                if isinstance(e.widget, (tk.Entry, tk.Spinbox)):
-                    return
-                fn()
-            return handler
+        self._draw_hint()
 
-        self.root.bind('<space>', _key_guard(self._toggle_play))
-        self.root.bind('<Left>',  _key_guard(lambda: self._step(-1)))
-        self.root.bind('<Right>', _key_guard(lambda: self._step(1)))
-        self.root.bind('<s>',     _key_guard(self._take_screenshot))
-        self.root.bind('<S>',     _key_guard(self._take_screenshot))
-
-        # 초기 안내
-        self._draw_empty()
-
-    def _draw_empty(self):
+    def _draw_hint(self):
         self.canvas.update_idletasks()
-        cw = max(self.canvas.winfo_width(), 200)
-        ch = max(self.canvas.winfo_height(), 200)
+        cw = max(self.canvas.winfo_width(), 10)
+        ch = max(self.canvas.winfo_height(), 10)
         self.canvas.delete('all')
         self.canvas.create_text(cw//2, ch//2,
                                  text='⏺ 녹화 버튼으로 시작하세요',
                                  fill=self.MUTED, font=('맑은 고딕', 14))
 
-    def _on_canvas_resize(self, event=None):
-        """창 크기 변경 시 현재 프레임 다시 그리기"""
-        if self.frames:
-            self._show_frame()
-        else:
-            self._draw_empty()
+    def _on_resize(self, e=None):
+        if self.frames: self._show_frame()
+        else: self._draw_hint()
 
-    # ── 재생
     def _show_frame(self):
         if not self.frames: return
         self.idx = max(0, min(self.idx, len(self.frames)-1))
-        rgb = self.frames[self.idx]
-        img = Image.fromarray(rgb)
+        img = Image.fromarray(self.frames[self.idx])
         self.canvas.update_idletasks()
         cw = max(self.canvas.winfo_width(), 10)
         ch = max(self.canvas.winfo_height(), 10)
         iw, ih = img.size
-        # 1.0 제한 제거 → 창 크기에 맞게 확대/축소 모두 허용
-        scale = min(cw / iw, ch / ih)
-        nw = max(int(iw * scale), 1)
-        nh = max(int(ih * scale), 1)
-        img = img.resize((nw, nh), Image.LANCZOS)
+        scale = min(cw/iw, ch/ih)
+        img = img.resize((max(int(iw*scale),1), max(int(ih*scale),1)), Image.LANCZOS)
         self._ref = ImageTk.PhotoImage(img)
         self.canvas.delete('all')
-        self.canvas.create_image(cw // 2, ch // 2, image=self._ref, anchor='center')
+        self.canvas.create_image(cw//2, ch//2, image=self._ref, anchor='center')
         try: self.progress.set(self.idx)
         except: pass
-        self.frame_lbl.config(
-            text=f'프레임 #{self.idx+1} / {len(self.frames)}   |   Space: 재생/정지   ←→: 이동   S: 스크린샷')
+        self.frm_lbl.config(text=f'프레임 #{self.idx+1}/{len(self.frames)}  Space:재생/정지  ←→:이동  S:스크린샷')
 
     def _toggle_play(self):
         if not self.frames: return
         self.playing = not self.playing
         if self.playing:
-            self.btn_play.config(text='⏸ 일시정지', bg=self.RED, fg='white')
+            self.btn_play.config(text='⏸ 정지', bg=self.RED, fg='white')
             self._play_loop()
         else:
-            self.btn_play.config(text='▶ 재생', bg=self.ACCENT, fg=self.BG)
-            if self._after_id:
-                try: self.root.after_cancel(self._after_id)
+            self.btn_play.config(text='▶ 재생', bg=self.ACC, fg='#000')
+            if self._aid:
+                try: self.root.after_cancel(self._aid)
                 except: pass
 
     def _play_loop(self):
         if not self.playing: return
-        if self.idx >= len(self.frames) - 1:
-            self.idx = len(self.frames) - 1
-            self._show_frame()
+        if self.idx >= len(self.frames)-1:
             self._toggle_play()
             return
         self.idx += 1
         self._show_frame()
-        interval = max(int(1000 / (self.speed * 10)), 16)
-        self._after_id = self.root.after(interval, self._play_loop)
+        ms = max(int(1000/(self.speed*10)), 16)
+        self._aid = self.root.after(ms, self._play_loop)
 
     def _step(self, d):
         if not self.frames: return
         if self.playing: self._toggle_play()
-        self.idx = max(0, min(self.idx + d, len(self.frames)-1))
+        self.idx = max(0, min(self.idx+d, len(self.frames)-1))
         self._show_frame()
 
-    def _jump(self, idx):
+    def _jump(self, i):
         if not self.frames: return
         if self.playing: self._toggle_play()
-        self.idx = max(0, min(idx, len(self.frames)-1))
+        self.idx = i if i >= 0 else len(self.frames)-1
         self._show_frame()
 
-    def _jump_end(self):
-        self._jump(len(self.frames)-1)
-
-    def _on_seek(self, event=None):
+    def _seek(self, e=None):
         try:
             self.idx = int(self.progress.get())
             self._show_frame()
         except: pass
 
-    def _set_speed(self, spd):
-        self.speed = spd
-
-    # ── 스크린샷
-    def _take_screenshot(self):
-        if not self.frames: return
-        folder = self.auto_folder.get()
-        if not folder or not os.path.isdir(folder):
-            folder = filedialog.askdirectory(title='스크린샷 저장 폴더 선택')
-            if not folder: return
-            self.auto_folder.set(folder)
-        self.screenshot_count += 1
-        # 사용자가 설정한 파일명 사용
-        base = self.filename_var.get().strip() or 'screenshot'
-        # 파일명에 사용 불가한 문자 제거
-        for ch in r'\/:*?"<>|':
-            base = base.replace(ch, '_')
-        path = os.path.join(folder, f'{base}_{self.screenshot_count:04d}.png')
-        Image.fromarray(self.frames[self.idx]).save(path)
-        self.canvas.configure(bg='white')
-        self.root.after(80, lambda: self.canvas.configure(bg='#080810'))
-        self.shot_lbl.config(text=f'📸 {self.screenshot_count}장 저장됨')
-        self.status_var.set(f'📸 저장  →  {path}')
-
-    def _change_folder(self):
-        folder = filedialog.askdirectory(title='저장 폴더 선택')
-        if folder: self.auto_folder.set(folder)
-
-    # ── 프레임 저장 팝업
-    def _open_picker(self):
-        if not self.frames:
-            messagebox.showwarning('알림', '먼저 녹화를 진행하세요.')
-            return
-        FramePickerWindow(self.root, self.frames, self.bookmarks)
-
     # ── 녹화
     def start_recording(self):
-        if not MSS_AVAILABLE:
+        if not HAS_MSS:
             messagebox.showerror('오류', 'pip install mss 후 재실행하세요.')
             return
         self.root.withdraw()
-        self.root.after(200, self._open_region_selector)
+        self.root.after(300, self._sel_region)
 
-    def _open_region_selector(self):
-        import ctypes
+    def _sel_region(self):
+        dpi = self.dpi
 
-        # DPI 배율: 주모니터 물리픽셀 / tkinter 논리픽셀
-        try:
-            sw = self.root.winfo_screenwidth()
-            pw = ctypes.windll.user32.GetSystemMetrics(0)
-            dpi = pw / sw if sw > 0 else 1.0
-        except Exception:
-            dpi = 1.0
-
-        # 원래 잘 되던 방식: fullscreen 반투명 창
         sel = tk.Toplevel()
         sel.attributes('-fullscreen', True)
-        sel.attributes('-alpha', 0.4)
+        sel.attributes('-alpha', 0.35)
         sel.attributes('-topmost', True)
         sel.configure(bg='black')
         sel.lift()
@@ -922,43 +700,37 @@ class App:
 
         canvas = tk.Canvas(sel, cursor='cross', bg='black', highlightthickness=0)
         canvas.pack(fill='both', expand=True)
-
         tk.Label(sel, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
                  bg='black', fg='white',
                  font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.05, anchor='center')
 
-        size_lbl = tk.Label(sel, text='', bg='#cc0000', fg='white',
+        size_lbl = tk.Label(sel, text='', bg='#c0392b', fg='white',
                              font=('Consolas', 11, 'bold'), padx=8, pady=3)
 
-        state = {'sx': 0, 'sy': 0, 'rect': None}
+        st = {'sx':0,'sy':0,'rect':None}
 
         def press(e):
-            state['sx'], state['sy'] = e.x, e.y
-            state['rect'] = canvas.create_rectangle(
-                e.x, e.y, e.x, e.y, outline='red', width=3)
-
+            st['sx'],st['sy'] = e.x,e.y
+            st['rect'] = canvas.create_rectangle(e.x,e.y,e.x,e.y,
+                                                  outline='#e74c3c',width=3)
         def drag(e):
-            canvas.coords(state['rect'], state['sx'], state['sy'], e.x, e.y)
-            w = int(abs(e.x - state['sx']) * dpi)
-            h = int(abs(e.y - state['sy']) * dpi)
-            size_lbl.config(text=f' {w} × {h} ')
-            lx = min(e.x + 12, sel.winfo_width() - 160)
-            ly = min(e.y + 12, sel.winfo_height() - 40)
+            canvas.coords(st['rect'],st['sx'],st['sy'],e.x,e.y)
+            w = int(abs(e.x-st['sx'])*dpi)
+            h = int(abs(e.y-st['sy'])*dpi)
+            size_lbl.config(text=f' {w}×{h} ')
+            lx = min(e.x+10, sel.winfo_width()-150)
+            ly = min(e.y+10, sel.winfo_height()-35)
             size_lbl.place(x=lx, y=ly)
 
         def release(e):
-            x1 = min(state['sx'], e.x)
-            y1 = min(state['sy'], e.y)
-            x2 = max(state['sx'], e.x)
-            y2 = max(state['sy'], e.y)
+            x1=min(st['sx'],e.x); y1=min(st['sy'],e.y)
+            x2=max(st['sx'],e.x); y2=max(st['sy'],e.y)
             sel.destroy()
             self.root.deiconify()
-            if x2 - x1 > 10 and y2 - y1 > 10:
+            if x2-x1>10 and y2-y1>10:
                 self._on_region({
-                    'left':   int(x1 * dpi),
-                    'top':    int(y1 * dpi),
-                    'width':  int((x2 - x1) * dpi),
-                    'height': int((y2 - y1) * dpi),
+                    'left':  int(x1*dpi), 'top':   int(y1*dpi),
+                    'width': int((x2-x1)*dpi), 'height': int((y2-y1)*dpi)
                 })
             else:
                 self._on_region(None)
@@ -977,35 +749,29 @@ class App:
         self.root.deiconify()
         if region is None: return
         self.region = region
-        self.btn_start.config(state='disabled')
+        self.btn_rec.config(state='disabled')
         if self.delay_var.get():
-            self.status_var.set('3초 후 녹화 시작...')
-            Countdown(region, self._begin_recording)
+            self.stat_var.set('3초 후 녹화 시작...')
+            Countdown(region, self.dpi, self._begin_rec)
         else:
-            self._begin_recording()
+            self._begin_rec()
 
-    def _begin_recording(self):
+    def _begin_rec(self):
         r = self.region
-        self.float_ctrl = FloatingControls(r, self.stop_recording)
-        self.recorder   = Recorder(r, self.fps_var.get(), self._on_frame,
-                                    lambda: self.float_ctrl.paused if self.float_ctrl else False)
-        self.status_var.set(f'🔴 녹화 중  –  {r["width"]}×{r["height"]}  |  {self.fps_var.get()} FPS')
-        # 진행바 범위 업데이트
+        self.recbar   = RecBar(r, self.dpi, self.stop_recording)
+        self.recorder = Recorder(r, self.fps_var.get(), self._on_frame,
+                                  lambda: self.recbar.paused if self.recbar else False)
         self.progress.configure(to=1)
+        self.stat_var.set(f'🔴 녹화 중 – {r["width"]}×{r["height"]} | {self.fps_var.get()} FPS')
         self.recorder.start()
 
     def stop_recording(self):
-        if self.recorder:
-            self.recorder.stop()
-            self.recorder = None
-        if self.float_ctrl:
-            self.float_ctrl.destroy()
-            self.float_ctrl = None
-        self.btn_start.config(state='normal')
-        total = len(self.frames)
-        if total > 1:
-            self.progress.configure(to=total-1)
-        self.status_var.set(f'녹화 완료  –  총 {total}개 프레임  |  재생 버튼을 누르세요')
+        if self.recorder: self.recorder.stop(); self.recorder = None
+        if self.recbar:   self.recbar.destroy(); self.recbar   = None
+        self.btn_rec.config(state='normal')
+        n = len(self.frames)
+        if n > 1: self.progress.configure(to=n-1)
+        self.stat_var.set(f'녹화 완료 – 총 {n}개 프레임')
 
     def _on_frame(self, rgb, idx):
         self.frames.append(rgb)
@@ -1013,28 +779,51 @@ class App:
 
     def _on_frame_ui(self, idx):
         self.cnt_var.set(f'프레임 {len(self.frames)}')
-        # 녹화 중 최신 프레임 실시간 표시
         self.idx = idx
         self._show_frame()
+
+    # ── 스크린샷
+    def _screenshot(self):
+        if not self.frames: return
+        folder = self.auto_folder.get()
+        if not folder or not os.path.isdir(folder):
+            folder = filedialog.askdirectory(title='저장 폴더')
+            if not folder: return
+            self.auto_folder.set(folder)
+        self.shot_count += 1
+        base = ''.join(c if c not in r'\/:*?"<>|' else '_'
+                       for c in (self.filename_var.get().strip() or 'screenshot'))
+        path = os.path.join(folder, f'{base}_{self.shot_count:04d}.png')
+        Image.fromarray(self.frames[self.idx]).save(path)
+        self.canvas.configure(bg='white')
+        self.root.after(60, lambda: self.canvas.configure(bg='#08080e'))
+        self.shot_lbl.config(text=f'📸 {self.shot_count}장')
+        self.stat_var.set(f'📸 저장 → {path}')
+
+    def _chg_folder(self):
+        f = filedialog.askdirectory()
+        if f: self.auto_folder.set(f)
+
+    # ── 프레임 저장 팝업
+    def _open_picker(self):
+        if not self.frames:
+            messagebox.showwarning('알림', '먼저 녹화를 진행하세요.')
+            return
+        PickerWindow(self.root, self.frames, self.bookmarks)
 
     # ── 초기화
     def clear_all(self):
         if self.frames and not messagebox.askyesno('초기화', '모든 프레임을 삭제할까요?'):
             return
         if self.recorder: self.stop_recording()
-        if self.playing: self._toggle_play()
-        self.frames.clear()
-        self.bookmarks.clear()
-        self.idx = 0
-        self.screenshot_count = 0
-        self._ref = None
-        self.progress.configure(to=1)
-        self.progress.set(0)
-        self.cnt_var.set('프레임 0')
-        self.shot_lbl.config(text='')
-        self.status_var.set('초기화됨')
-        self.frame_lbl.config(text='녹화 후 재생 가능합니다')
-        self._draw_empty()
+        if self.playing:  self._toggle_play()
+        self.frames.clear(); self.bookmarks.clear()
+        self.idx = 0; self.shot_count = 0; self._ref = None
+        self.progress.configure(to=1); self.progress.set(0)
+        self.cnt_var.set('프레임 0'); self.shot_lbl.config(text='')
+        self.stat_var.set('초기화됨')
+        self.frm_lbl.config(text='녹화 후 재생 가능합니다')
+        self._draw_hint()
 
     def run(self):
         self.root.mainloop()
