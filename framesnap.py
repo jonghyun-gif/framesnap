@@ -116,31 +116,41 @@ class FloatingControls:
         self.win.configure(bg='#1a1a1a')
 
         frame = tk.Frame(self.win, bg='#1a1a1a')
-        frame.pack(fill='both', expand=True, padx=10, pady=8)
+        frame.pack(fill='both', expand=True, padx=8, pady=6)
 
         self.rec_lbl = tk.Label(frame, text='⏺ REC', bg='#1a1a1a', fg='red',
-                                 font=('Consolas', 16, 'bold'))
-        self.rec_lbl.pack(side='left', padx=12)
+                                 font=('Consolas', 11, 'bold'))
+        self.rec_lbl.pack(side='left', padx=8)
 
         self.btn_pause = tk.Button(frame, text='⏸ 일시정지', command=self._toggle_pause,
                                     bg='#444', fg='white', relief='flat',
-                                    font=('맑은 고딕', 13, 'bold'), padx=16, pady=8,
+                                    font=('맑은 고딕', 10, 'bold'), padx=10, pady=5,
                                     cursor='hand2', bd=0)
-        self.btn_pause.pack(side='left', padx=6)
+        self.btn_pause.pack(side='left', padx=4)
 
         tk.Button(frame, text='⏹ 중지', command=on_stop,
                   bg='#FF4E6A', fg='white', relief='flat',
-                  font=('맑은 고딕', 13, 'bold'), padx=20, pady=8,
-                  cursor='hand2', bd=0).pack(side='left', padx=6)
+                  font=('맑은 고딕', 10, 'bold'), padx=12, pady=5,
+                  cursor='hand2', bd=0).pack(side='left', padx=4)
 
-        # 크기를 내용에 맞게 자동 계산
+        # 크기 고정값으로 지정 (winfo_reqwidth는 DPI에서 부정확)
+        bw, bh = 280, 44
+        self.win.geometry(f'{bw}x{bh}')
         self.win.update_idletasks()
-        bw = self.win.winfo_reqwidth()
-        bh = self.win.winfo_reqheight()
 
+        # 위치: 녹화 영역 바로 위 중앙, 영역을 벗어나지 않게
         cx = region['left'] + region['width'] // 2 - bw // 2
-        cy = region['top'] - bh - 10
-        if cy < 0: cy = region['top'] + 10
+        cy = region['top'] - bh - 6
+        # 화면 위로 벗어나면 영역 안쪽 상단에 배치
+        if cy < 0:
+            cy = region['top'] + 4
+        # 화면 왼쪽 벗어남 방지
+        if cx < region['left']:
+            cx = region['left']
+        # 화면 오른쪽 벗어남 방지
+        if cx + bw > region['left'] + region['width']:
+            cx = region['left'] + region['width'] - bw
+
         self.win.geometry(f'{bw}x{bh}+{cx}+{cy}')
 
         for w in (frame, self.rec_lbl):
