@@ -23,7 +23,7 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --onefile --windowed --name FrameSnap --manifest dpi_aware.manifest framesnap.py
+        pyinstaller --onefile --windowed --name FrameSnap framesnap.py
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
