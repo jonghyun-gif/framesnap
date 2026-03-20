@@ -133,10 +133,14 @@ class FloatingControls:
                   font=('맑은 고딕', 10, 'bold'), padx=12, pady=5,
                   cursor='hand2', bd=0).pack(side='left', padx=4)
 
-        # 크기 고정값으로 지정 (winfo_reqwidth는 DPI에서 부정확)
-        bw, bh = 280, 44
-        self.win.geometry(f'{bw}x{bh}')
+        # 내용에 맞게 창 크기 자동 결정
         self.win.update_idletasks()
+        # winfo_reqwidth/height는 논리픽셀이지만 overrideredirect 창에선 정확함
+        bw = frame.winfo_reqwidth()  + 20
+        bh = frame.winfo_reqheight() + 12
+        # 최소 크기 보장
+        bw = max(bw, 240)
+        bh = max(bh, 40)
 
         # 위치: 녹화 영역 바로 위 중앙, 영역을 벗어나지 않게
         cx = region['left'] + region['width'] // 2 - bw // 2
@@ -868,39 +872,49 @@ class App:
 
     def _open_region_selector(self):
         """
-        마우스 커서가 있는 모니터 하나에서만 영역 선택.
-        mss 캡처 → 그 이미지를 배경으로 사용 → 좌표 완전 일치.
+        mss로 현재 모니터 캡처 → 배경으로 사용.
+        tkinter 논리좌표 → DPI 배율 곱해서 mss 물리좌표로 변환.
         """
+        import ctypes
+
+        # DPI 배율 계산 (Windows)
+        try:
+            # 주 모니터 물리 해상도
+            phys_w = ctypes.windll.user32.GetSystemMetrics(0)
+            phys_h = ctypes.windll.user32.GetSystemMetrics(1)
+        except Exception:
+            phys_w = phys_h = 0
+
+        # 마우스 커서 위치로 현재 모니터 찾기
+        try:
+            class _PT(ctypes.Structure):
+                _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
+            pt = _PT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            mx, my = pt.x, pt.y
+        except Exception:
+            mx, my = 0, 0
+
         try:
             with mss.mss() as sct:
-                # 마우스 위치로 현재 모니터 찾기
-                import ctypes
-                class _PT(ctypes.Structure):
-                    _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
-                pt = _PT()
-                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-                mx, my = pt.x, pt.y
-
-                # monitors[0] = 전체, monitors[1]~ = 개별
-                target_mon = sct.monitors[1]  # 기본값: 주 모니터
+                target_mon = sct.monitors[1]
                 for m in sct.monitors[1:]:
                     if (m['left'] <= mx < m['left'] + m['width'] and
                             m['top'] <= my < m['top'] + m['height']):
                         target_mon = m
                         break
-
                 shot  = sct.grab(target_mon)
                 img   = Image.frombytes('RGB', shot.size, shot.bgra, 'raw', 'BGRX')
                 off_x = target_mon['left']
                 off_y = target_mon['top']
-                mon_w = target_mon['width']
+                mon_w = target_mon['width']   # mss 물리 픽셀 너비
                 mon_h = target_mon['height']
         except Exception as ex:
             self.root.deiconify()
             messagebox.showerror('오류', f'화면 캡처 실패: {ex}')
             return
 
-        # ── 오버레이: 해당 모니터 위에만 생성
+        # ── 오버레이 창 (해당 모니터에만)
         ov = tk.Toplevel()
         ov.overrideredirect(True)
         ov.attributes('-topmost', True)
@@ -908,31 +922,34 @@ class App:
         ov.lift()
         ov.update()
 
-        # 배경 이미지 어둡게
-        dark   = Image.new('RGB', (mon_w, mon_h), (0, 0, 0))
-        dimmed = Image.blend(img, dark, 0.45)
-        bg_photo = ImageTk.PhotoImage(dimmed)
+        # tkinter가 실제로 그린 창 크기 (논리 픽셀)
+        logic_w = ov.winfo_width()
+        logic_h = ov.winfo_height()
+
+        # DPI 배율: tkinter 논리좌표 → mss 물리좌표
+        scale_x = mon_w / logic_w if logic_w > 0 else 1.0
+        scale_y = mon_h / logic_h if logic_h > 0 else 1.0
+
+        # 배경: 캡처 이미지를 논리 해상도 크기로 리사이즈
+        dimmed = Image.blend(img, Image.new('RGB', (mon_w, mon_h), (0,0,0)), 0.45)
+        display = dimmed.resize((logic_w, logic_h), Image.LANCZOS) if (logic_w != mon_w) else dimmed
+        bg_photo = ImageTk.PhotoImage(display)
 
         cv = tk.Canvas(ov, cursor='crosshair',
-                       width=mon_w, height=mon_h,
+                       width=logic_w, height=logic_h,
                        highlightthickness=0, bd=0)
         cv.pack()
         cv.create_image(0, 0, anchor='nw', image=bg_photo)
         cv._keep = bg_photo
 
-        # 안내 텍스트
-        cv.create_text(mon_w // 2, 36,
+        cv.create_text(logic_w // 2, 36,
                        text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
-                       fill='white', font=('맑은 고딕', 14, 'bold'),
-                       tags='guide')
+                       fill='white', font=('맑은 고딕', 14, 'bold'), tags='guide')
 
-        # 크기 표시
         cv.create_rectangle(0, 0, 0, 0, fill='#cc0000', outline='', tags='sizebg')
         cv.create_text(0, 0, text='', fill='white',
-                       font=('Consolas', 12, 'bold'), anchor='nw', tags='sizelbl')
+                       font=('Consolas', 11, 'bold'), anchor='nw', tags='sizelbl')
         cv.tag_lower('sizebg', 'sizelbl')
-
-        # 선택 사각형
         cv.create_rectangle(0, 0, 0, 0, outline='#00d4ff', width=2, tags='rect')
 
         state = {'x0': 0, 'y0': 0, 'dragging': False}
@@ -944,36 +961,36 @@ class App:
             cv.coords('rect', e.x, e.y, e.x, e.y)
 
         def on_drag(e):
-            if not state['dragging']:
-                return
-            x0, y0, x1, y1 = state['x0'], state['y0'], e.x, e.y
-            cv.coords('rect', min(x0,x1), min(y0,y1), max(x0,x1), max(y0,y1))
-            w, h = abs(x1-x0), abs(y1-y0)
-            lx = min(x0, x1)
-            ly = max(y0, y1) + 8
-            if ly + 28 > mon_h:
-                ly = min(y0, y1) - 28
+            if not state['dragging']: return
+            x0, y0 = state['x0'], state['y0']
+            cv.coords('rect', min(x0,e.x), min(y0,e.y), max(x0,e.x), max(y0,e.y))
+            # 표시용 크기는 물리 픽셀로
+            w = int(abs(e.x - x0) * scale_x)
+            h = int(abs(e.y - y0) * scale_y)
+            lx = min(x0, e.x)
+            ly = max(y0, e.y) + 8
+            if ly + 26 > logic_h: ly = min(y0, e.y) - 26
             cv.coords('sizelbl', lx, ly)
             cv.itemconfig('sizelbl', text=f'  {w} × {h}  ')
             bb = cv.bbox('sizelbl')
-            if bb:
-                cv.coords('sizebg', bb[0]-2, bb[1]-2, bb[2]+2, bb[3]+2)
+            if bb: cv.coords('sizebg', bb[0]-2, bb[1]-2, bb[2]+2, bb[3]+2)
 
         def on_release(e):
-            if not state['dragging']:
-                return
+            if not state['dragging']: return
             state['dragging'] = False
-            x0, y0 = state['x0'], state['y0']
-            lx, ly = min(x0, e.x), min(y0, e.y)
-            rx, ry = max(x0, e.x), max(y0, e.y)
+            lx = min(state['x0'], e.x)
+            ly = min(state['y0'], e.y)
+            rx = max(state['x0'], e.x)
+            ry = max(state['y0'], e.y)
             ov.destroy()
             self.root.deiconify()
             if rx - lx > 10 and ry - ly > 10:
+                # 논리좌표 → 물리좌표 변환 후 off_x/off_y 더하기
                 self._on_region({
-                    'left':   lx + off_x,
-                    'top':    ly + off_y,
-                    'width':  rx - lx,
-                    'height': ry - ly,
+                    'left':   int(lx * scale_x) + off_x,
+                    'top':    int(ly * scale_y) + off_y,
+                    'width':  int((rx - lx) * scale_x),
+                    'height': int((ry - ly) * scale_y),
                 })
             else:
                 self._on_region(None)
@@ -987,117 +1004,6 @@ class App:
         cv.bind('<B1-Motion>',       on_drag)
         cv.bind('<ButtonRelease-1>', on_release)
         ov.bind('<Escape>',          on_cancel)
-
-    def _open_region_selector(self):
-        import ctypes
-
-        # 물리 픽셀 기준 전체 가상 스크린 크기 (멀티모니터 포함)
-        SM_XVIRTUALSCREEN  = 76
-        SM_YVIRTUALSCREEN  = 77
-        SM_CXVIRTUALSCREEN = 78
-        SM_CYVIRTUALSCREEN = 79
-        vx = ctypes.windll.user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-        vy = ctypes.windll.user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-        vw = ctypes.windll.user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-        vh = ctypes.windll.user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-
-        # 주 모니터 물리 해상도
-        class POINT(ctypes.Structure):
-            _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
-
-        def get_cursor_pos():
-            pt = POINT()
-            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-            return pt.x, pt.y
-
-        # tkinter 창을 전체 가상 화면 크기로 생성
-        sel = tk.Toplevel()
-        sel.overrideredirect(True)   # 타이틀바 제거
-        sel.attributes('-topmost', True)
-        sel.attributes('-alpha', 0.45)
-        sel.configure(bg='black')
-        sel.geometry(f'{vw}x{vh}+{vx}+{vy}')
-        sel.lift()
-        sel.focus_force()
-        sel.update()
-
-        # tkinter 논리 해상도 vs 물리 해상도 비율
-        tw = sel.winfo_width()
-        th = sel.winfo_height()
-        # 비율: 물리좌표 → tkinter 캔버스 좌표
-        sx = tw / vw if vw > 0 else 1.0
-        sy = th / vh if vh > 0 else 1.0
-        # 비율: tkinter 캔버스 좌표 → 물리좌표
-        rx_scale = vw / tw if tw > 0 else 1.0
-        ry_scale = vh / th if th > 0 else 1.0
-
-        canvas = tk.Canvas(sel, cursor='cross', bg='black', highlightthickness=0)
-        canvas.pack(fill='both', expand=True)
-
-        tk.Label(sel, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
-                 bg='black', fg='white',
-                 font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.05, anchor='center')
-
-        size_lbl = tk.Label(sel, text='', bg='#cc0000', fg='white',
-                             font=('Consolas', 12, 'bold'), padx=10, pady=4)
-
-        state = {'px': 0, 'py': 0, 'rect': None, 'down': False}
-
-        def press(e):
-            px, py = get_cursor_pos()
-            state['px'], state['py'] = px, py
-            state['down'] = True
-            # 캔버스 그리기용 논리 좌표
-            cx = int((px - vx) * sx)
-            cy = int((py - vy) * sy)
-            state['rect'] = canvas.create_rectangle(cx, cy, cx, cy,
-                                                     outline='red', width=3)
-
-        def drag(e):
-            if not state['down']: return
-            px, py = get_cursor_pos()
-            x1 = int((min(state['px'], px) - vx) * sx)
-            y1 = int((min(state['py'], py) - vy) * sy)
-            x2 = int((max(state['px'], px) - vx) * sx)
-            y2 = int((max(state['py'], py) - vy) * sy)
-            canvas.coords(state['rect'], x1, y1, x2, y2)
-            w = abs(px - state['px'])
-            h = abs(py - state['py'])
-            size_lbl.config(text=f' {w} × {h} ')
-            lx = min(int((px - vx) * sx) + 14, tw - 160)
-            ly = min(int((py - vy) * sy) + 14, th - 50)
-            size_lbl.place(x=lx, y=ly)
-
-        def release(e):
-            if not state['down']: return
-            state['down'] = False
-            px, py = get_cursor_pos()
-            x1 = min(state['px'], px)
-            y1 = min(state['py'], py)
-            x2 = max(state['px'], px)
-            y2 = max(state['py'], py)
-            sel.destroy()
-            self.root.deiconify()
-            if x2 - x1 > 10 and y2 - y1 > 10:
-                self._on_region({
-                    'top':    y1,
-                    'left':   x1,
-                    'width':  x2 - x1,
-                    'height': y2 - y1,
-                })
-            else:
-                self._on_region(None)
-
-        def cancel(e=None):
-            state['down'] = False
-            sel.destroy()
-            self.root.deiconify()
-            self._on_region(None)
-
-        canvas.bind('<ButtonPress-1>',   press)
-        canvas.bind('<B1-Motion>',       drag)
-        canvas.bind('<ButtonRelease-1>', release)
-        sel.bind('<Escape>', cancel)
 
     def _on_region(self, region):
         self.root.deiconify()
