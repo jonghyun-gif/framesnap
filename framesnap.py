@@ -569,158 +569,154 @@ class App:
                          cursor='hand2', state=state, bd=0, **kw)
 
     def _build(self):
-        # ── 탑바 (높이 자동 - 버튼 잘림 방지)
+        # ── 탑바
         bar = tk.Frame(self.root, bg=self.PANEL)
         bar.pack(fill='x')
 
         tk.Label(bar, text='⬛ FrameSnap', bg=self.PANEL, fg=self.ACCENT,
-                 font=('Consolas', 14, 'bold')).pack(side='left', padx=16)
+                 font=('Consolas', 12, 'bold')).pack(side='left', padx=12, pady=8)
 
         fps_f = tk.Frame(bar, bg=self.PANEL)
-        fps_f.pack(side='left', padx=6)
+        fps_f.pack(side='left', padx=4)
         tk.Label(fps_f, text='FPS', bg=self.PANEL, fg=self.MUTED,
-                 font=('Consolas', 9)).pack(side='left')
+                 font=('Consolas', 8)).pack(side='left')
         tk.Spinbox(fps_f, from_=1, to=30, textvariable=self.fps_var, width=3,
                    bg='#252530', fg=self.TEXT, insertbackground=self.TEXT,
-                   relief='flat', font=('Consolas', 12), justify='center',
-                   buttonbackground='#252530').pack(side='left', padx=5)
+                   relief='flat', font=('Consolas', 10), justify='center',
+                   buttonbackground='#252530').pack(side='left', padx=4)
 
         tk.Checkbutton(bar, text='3초 후 시작', variable=self.delay_var,
                        bg=self.PANEL, fg=self.TEXT, selectcolor='#252530',
-                       activebackground=self.PANEL, font=('맑은 고딕', 9),
-                       cursor='hand2').pack(side='left', padx=10)
+                       activebackground=self.PANEL, font=('맑은 고딕', 8),
+                       cursor='hand2').pack(side='left', padx=8)
 
-        # 오른쪽: 녹화 + 초기화 + 프레임저장
-        self._btn(bar, '🗑  초기화', self.clear_all).pack(side='right', padx=6, pady=10)
-        self._btn(bar, '🖼  프레임 저장', self._open_picker,
-                  bg='#2a2a50').pack(side='right', padx=4, pady=10)
-        self.btn_start = self._btn(bar, '⏺  영역 선택 후 녹화', self.start_recording,
+        self._btn(bar, '🗑 초기화', self.clear_all).pack(side='right', padx=4, pady=6)
+        self._btn(bar, '🖼 프레임 저장', self._open_picker,
+                  bg='#2a2a50').pack(side='right', padx=4, pady=6)
+        self.btn_start = self._btn(bar, '⏺ 영역 선택 후 녹화', self.start_recording,
                                     bg=self.ACCENT, fg=self.BG)
-        self.btn_start.pack(side='right', padx=4, pady=10)
+        self.btn_start.pack(side='right', padx=4, pady=6)
 
         # ── 상태바
-        sbar = tk.Frame(self.root, bg='#111118', height=24)
+        sbar = tk.Frame(self.root, bg='#111118', height=22)
         sbar.pack(fill='x')
         sbar.pack_propagate(False)
         self.status_var = tk.StringVar(value='준비됨  –  영역 선택 후 녹화 버튼을 누르세요')
         self.cnt_var    = tk.StringVar(value='프레임 0')
         tk.Label(sbar, textvariable=self.status_var, bg='#111118', fg=self.MUTED,
-                 font=('Consolas', 8)).pack(side='left', padx=12)
+                 font=('Consolas', 8)).pack(side='left', padx=10)
         tk.Label(sbar, textvariable=self.cnt_var, bg='#111118', fg=self.ACCENT,
-                 font=('Consolas', 8, 'bold')).pack(side='right', padx=12)
+                 font=('Consolas', 8, 'bold')).pack(side='right', padx=10)
 
-        # ── 영상 캔버스 (메인) - 창 크기 변경 시 자동 리드로우
+        # ── 영상 캔버스
         self.canvas = tk.Canvas(self.root, bg='#080810', highlightthickness=0)
-        self.canvas.pack(fill='both', expand=True, padx=8, pady=(6,0))
+        self.canvas.pack(fill='both', expand=True, padx=6, pady=(4,0))
         self.canvas.bind('<Configure>', self._on_canvas_resize)
 
-        # ── 진행바 (크게)
+        # ── 진행바
         bar_f = tk.Frame(self.root, bg=self.BG)
-        bar_f.pack(fill='x', padx=8, pady=(6,2))
-
-        # ttk Scale 스타일 크게
+        bar_f.pack(fill='x', padx=6, pady=(4,2))
         style = ttk.Style()
         style.theme_use('clam')
         style.configure('Big.Horizontal.TScale', troughcolor='#2a2a38',
-                         sliderthickness=22, sliderrelief='flat')
+                         sliderthickness=18, sliderrelief='flat')
         self.progress = ttk.Scale(bar_f, from_=0, to=1, orient='horizontal',
                                    style='Big.Horizontal.TScale')
-        self.progress.pack(fill='x', ipady=6)
+        self.progress.pack(fill='x', ipady=4)
         self.progress.bind('<ButtonRelease-1>', self._on_seek)
         self.progress.bind('<B1-Motion>',       self._on_seek)
 
-        # 프레임 번호 / 스크린샷 카운트
+        # 프레임 정보
         info_f = tk.Frame(self.root, bg=self.BG)
-        info_f.pack(fill='x', padx=12)
+        info_f.pack(fill='x', padx=10)
         self.frame_lbl = tk.Label(info_f, text='녹화 후 재생 가능합니다',
-                                   bg=self.BG, fg=self.MUTED, font=('맑은 고딕', 10))
+                                   bg=self.BG, fg=self.MUTED, font=('맑은 고딕', 9))
         self.frame_lbl.pack(side='left')
         self.shot_lbl = tk.Label(info_f, text='', bg=self.BG, fg=self.GOLD,
-                                  font=('맑은 고딕', 10, 'bold'))
+                                  font=('맑은 고딕', 9, 'bold'))
         self.shot_lbl.pack(side='right')
 
-        # ── 재생 컨트롤 바 (높이 자동)
+        # ── 재생 컨트롤 바
         ctrl = tk.Frame(self.root, bg=self.PANEL)
-        ctrl.pack(fill='x', pady=(4,0))
+        ctrl.pack(fill='x', pady=(2,0))
 
-        # 속도 버튼
+        # 속도
         spd_f = tk.Frame(ctrl, bg=self.PANEL)
-        spd_f.pack(side='left', padx=14, pady=10)
+        spd_f.pack(side='left', padx=10, pady=6)
         tk.Label(spd_f, text='속도', bg=self.PANEL, fg=self.MUTED,
-                 font=('맑은 고딕', 10)).pack(side='left', padx=(0,6))
+                 font=('맑은 고딕', 8)).pack(side='left', padx=(0,4))
         for spd, lbl in [(0.25,'¼x'),(0.5,'½x'),(1.0,'1x'),(2.0,'2x'),(4.0,'4x')]:
             tk.Button(spd_f, text=lbl, command=lambda s=spd: self._set_speed(s),
                       bg='#2a2a38', fg=self.TEXT, relief='flat',
-                      font=('Consolas', 11, 'bold'), padx=12, pady=8,
-                      cursor='hand2', bd=0).pack(side='left', padx=3)
+                      font=('Consolas', 9, 'bold'), padx=8, pady=4,
+                      cursor='hand2', bd=0).pack(side='left', padx=2)
 
-        # 재생 버튼들 (크게)
+        # 재생 버튼
         play_f = tk.Frame(ctrl, bg=self.PANEL)
-        play_f.pack(side='left', padx=20, pady=8)
+        play_f.pack(side='left', padx=12, pady=6)
         for txt, cmd in [('⏮', lambda: self._jump(0)),
                           ('◀◀', lambda: self._step(-10)),
                           ('◀',  lambda: self._step(-1))]:
             tk.Button(play_f, text=txt, command=cmd,
                       bg='#2a2a38', fg=self.TEXT, relief='flat',
-                      font=('Consolas', 15), padx=12, pady=8,
-                      cursor='hand2', bd=0).pack(side='left', padx=3)
+                      font=('Consolas', 12), padx=8, pady=5,
+                      cursor='hand2', bd=0).pack(side='left', padx=2)
 
         self.btn_play = tk.Button(play_f, text='▶ 재생', command=self._toggle_play,
                                    bg=self.ACCENT, fg=self.BG, relief='flat',
-                                   font=('맑은 고딕', 13, 'bold'), padx=22, pady=10,
+                                   font=('맑은 고딕', 10, 'bold'), padx=14, pady=6,
                                    cursor='hand2', bd=0)
-        self.btn_play.pack(side='left', padx=8)
+        self.btn_play.pack(side='left', padx=5)
 
         for txt, cmd in [('▶',  lambda: self._step(1)),
                           ('▶▶', lambda: self._step(10)),
                           ('⏭', lambda: self._jump_end())]:
             tk.Button(play_f, text=txt, command=cmd,
                       bg='#2a2a38', fg=self.TEXT, relief='flat',
-                      font=('Consolas', 15), padx=12, pady=8,
-                      cursor='hand2', bd=0).pack(side='left', padx=3)
+                      font=('Consolas', 12), padx=8, pady=5,
+                      cursor='hand2', bd=0).pack(side='left', padx=2)
 
-        # ── 저장 설정 + 📸 스크린샷 (오른쪽)
+        # 저장 설정 + 스크린샷
         right_f = tk.Frame(ctrl, bg=self.PANEL)
-        right_f.pack(side='right', padx=14, pady=6)
+        right_f.pack(side='right', padx=10, pady=4)
 
-        # 폴더 + 파일명 설정 그리드
         cfg_f = tk.Frame(right_f, bg=self.PANEL)
         cfg_f.pack(side='top', anchor='e')
 
-        # 저장 폴더 행
-        tk.Label(cfg_f, text='📁 폴더:', bg=self.PANEL, fg=self.MUTED,
-                 font=('맑은 고딕', 9)).grid(row=0, column=0, sticky='e', padx=(0,4), pady=2)
+        tk.Label(cfg_f, text='📁', bg=self.PANEL, fg=self.MUTED,
+                 font=('맑은 고딕', 9)).grid(row=0, column=0, sticky='e', padx=(0,2), pady=1)
         self.folder_lbl = tk.Label(cfg_f, textvariable=self.auto_folder,
                                     bg='#252530', fg=self.TEXT,
-                                    font=('Consolas', 9), width=20, anchor='w', padx=4)
-        self.folder_lbl.grid(row=0, column=1, pady=2)
+                                    font=('Consolas', 8), width=18, anchor='w', padx=3)
+        self.folder_lbl.grid(row=0, column=1, pady=1)
         tk.Button(cfg_f, text='변경', command=self._change_folder,
                   bg='#3a3a50', fg=self.TEXT, relief='flat',
-                  font=('맑은 고딕', 9, 'bold'), padx=8, pady=2,
-                  cursor='hand2', bd=0).grid(row=0, column=2, padx=(4,0), pady=2)
+                  font=('맑은 고딕', 8), padx=6, pady=1,
+                  cursor='hand2', bd=0).grid(row=0, column=2, padx=(3,0), pady=1)
 
-        # 파일명 행
-        tk.Label(cfg_f, text='📄 파일명:', bg=self.PANEL, fg=self.MUTED,
-                 font=('맑은 고딕', 9)).grid(row=1, column=0, sticky='e', padx=(0,4), pady=2)
+        tk.Label(cfg_f, text='📄', bg=self.PANEL, fg=self.MUTED,
+                 font=('맑은 고딕', 9)).grid(row=1, column=0, sticky='e', padx=(0,2), pady=1)
         self.filename_var = tk.StringVar(value='screenshot')
         fn_entry = tk.Entry(cfg_f, textvariable=self.filename_var,
                             bg='#252530', fg=self.TEXT, insertbackground=self.TEXT,
-                            relief='flat', font=('Consolas', 9), width=20)
-        fn_entry.grid(row=1, column=1, pady=2, ipady=3)
+                            relief='flat', font=('Consolas', 8), width=18)
+        fn_entry.grid(row=1, column=1, pady=1, ipady=2)
         tk.Label(cfg_f, text='_0001.png', bg=self.PANEL, fg=self.MUTED,
-                 font=('Consolas', 9)).grid(row=1, column=2, padx=(4,0), pady=2, sticky='w')
+                 font=('Consolas', 8)).grid(row=1, column=2, padx=(3,0), pady=1, sticky='w')
 
-        # 📸 스크린샷 버튼
-        tk.Button(right_f, text='📸  스크린샷  [S]',
+        tk.Button(right_f, text='📸 스크린샷 [S]',
                   command=self._take_screenshot,
                   bg=self.RED, fg='white', relief='flat',
-                  font=('맑은 고딕', 12, 'bold'), padx=18, pady=8,
-                  cursor='hand2', bd=0).pack(side='bottom', pady=(4,0))
+                  font=('맑은 고딕', 10, 'bold'), padx=12, pady=5,
+                  cursor='hand2', bd=0).pack(side='bottom', pady=(3,0))
 
-        # 키 바인딩 - Entry에 포커스 있을 때는 무시
+        # ── 키 바인딩 (Entry 포커스 시 무시, canvas 클릭 후 포커스 복구)
+        self.canvas.bind('<Button-1>', lambda e: self.root.focus_set())
+
         def _key_guard(fn):
             def handler(e):
-                if isinstance(e.widget, tk.Entry): return
+                if isinstance(e.widget, (tk.Entry, tk.Spinbox)):
+                    return
                 fn()
             return handler
 
@@ -730,7 +726,7 @@ class App:
         self.root.bind('<s>',     _key_guard(self._take_screenshot))
         self.root.bind('<S>',     _key_guard(self._take_screenshot))
 
-        # 초기 안내 이미지
+        # 초기 안내
         self._draw_empty()
 
     def _draw_empty(self):
@@ -857,111 +853,98 @@ class App:
         if not MSS_AVAILABLE:
             messagebox.showerror('오류', 'pip install mss 후 재실행하세요.')
             return
-        # 메인창 숨기기
         self.root.withdraw()
         self.root.after(200, self._open_region_selector)
 
     def _open_region_selector(self):
         """
-        윈도우 캡처 도구(Snipping Tool) 방식:
-        1. mss로 현재 전체화면 스냅샷 캡처
-        2. 스냅샷을 배경으로 전체화면 창 띄우기
-        3. 마우스 드래그 좌표 = mss 캡처 좌표 (완전 1:1)
+        마우스 커서가 있는 모니터 하나에서만 영역 선택.
+        mss 캡처 → 그 이미지를 배경으로 사용 → 좌표 완전 일치.
         """
         try:
             with mss.mss() as sct:
-                # 전체 가상화면 (멀티모니터 포함)
-                mon   = sct.monitors[0]
-                shot  = sct.grab(mon)
+                # 마우스 위치로 현재 모니터 찾기
+                import ctypes
+                class _PT(ctypes.Structure):
+                    _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
+                pt = _PT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                mx, my = pt.x, pt.y
+
+                # monitors[0] = 전체, monitors[1]~ = 개별
+                target_mon = sct.monitors[1]  # 기본값: 주 모니터
+                for m in sct.monitors[1:]:
+                    if (m['left'] <= mx < m['left'] + m['width'] and
+                            m['top'] <= my < m['top'] + m['height']):
+                        target_mon = m
+                        break
+
+                shot  = sct.grab(target_mon)
                 img   = Image.frombytes('RGB', shot.size, shot.bgra, 'raw', 'BGRX')
-                off_x = mon['left']   # 보통 0, 세컨드 모니터가 왼쪽이면 음수
-                off_y = mon['top']
-                cap_w = mon['width']
-                cap_h = mon['height']
+                off_x = target_mon['left']
+                off_y = target_mon['top']
+                mon_w = target_mon['width']
+                mon_h = target_mon['height']
         except Exception as ex:
             self.root.deiconify()
             messagebox.showerror('오류', f'화면 캡처 실패: {ex}')
             return
 
-        # ── 오버레이 창 생성
+        # ── 오버레이: 해당 모니터 위에만 생성
         ov = tk.Toplevel()
-        ov.overrideredirect(True)          # 테두리/타이틀바 없음
+        ov.overrideredirect(True)
         ov.attributes('-topmost', True)
-        ov.geometry(f'{cap_w}x{cap_h}+{off_x}+{off_y}')
+        ov.geometry(f'{mon_w}x{mon_h}+{off_x}+{off_y}')
         ov.lift()
         ov.update()
 
-        # ── 배경: 캡처 이미지를 어둡게 블렌딩
-        dark   = Image.new('RGB', (cap_w, cap_h), (0, 0, 0))
+        # 배경 이미지 어둡게
+        dark   = Image.new('RGB', (mon_w, mon_h), (0, 0, 0))
         dimmed = Image.blend(img, dark, 0.45)
-
-        # tkinter PhotoImage 크기 = 창 크기와 완전히 동일하게
         bg_photo = ImageTk.PhotoImage(dimmed)
 
         cv = tk.Canvas(ov, cursor='crosshair',
-                       width=cap_w, height=cap_h,
+                       width=mon_w, height=mon_h,
                        highlightthickness=0, bd=0)
         cv.pack()
         cv.create_image(0, 0, anchor='nw', image=bg_photo)
-        cv._keep = bg_photo   # GC 방지
+        cv._keep = bg_photo
 
         # 안내 텍스트
-        cv.create_text(cap_w // 2, 36,
+        cv.create_text(mon_w // 2, 36,
                        text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
                        fill='white', font=('맑은 고딕', 14, 'bold'),
                        tags='guide')
 
-        # 크기 라벨
-        size_id = cv.create_text(0, 0, text='', fill='white',
-                                  font=('Consolas', 13, 'bold'),
-                                  anchor='nw', tags='sizelbl')
-        size_bg = cv.create_rectangle(0, 0, 0, 0,
-                                       fill='#cc0000', outline='',
-                                       tags='sizebg')
+        # 크기 표시
+        cv.create_rectangle(0, 0, 0, 0, fill='#cc0000', outline='', tags='sizebg')
+        cv.create_text(0, 0, text='', fill='white',
+                       font=('Consolas', 12, 'bold'), anchor='nw', tags='sizelbl')
         cv.tag_lower('sizebg', 'sizelbl')
 
-        # 선택 사각형 (반투명 효과: 밝은 테두리 + 어두운 오버레이)
-        rect_id = cv.create_rectangle(0, 0, 0, 0,
-                                       outline='#00d4ff', width=2,
-                                       tags='rect')
-        # 선택 영역 원본 이미지로 밝게 표시
-        bright_photo = ImageTk.PhotoImage(img)
-        cv._bright = bright_photo
-        bright_id = cv.create_image(0, 0, anchor='nw',
-                                     image=bright_photo, tags='bright')
-        cv.itemconfig('bright', state='hidden')
+        # 선택 사각형
+        cv.create_rectangle(0, 0, 0, 0, outline='#00d4ff', width=2, tags='rect')
 
         state = {'x0': 0, 'y0': 0, 'dragging': False}
 
         def on_press(e):
-            state['x0'] = e.x
-            state['y0'] = e.y
+            state['x0'], state['y0'] = e.x, e.y
             state['dragging'] = True
             cv.itemconfig('guide', state='hidden')
-            cv.itemconfig('bright', state='normal')
             cv.coords('rect', e.x, e.y, e.x, e.y)
 
         def on_drag(e):
             if not state['dragging']:
                 return
-            x0, y0 = state['x0'], state['y0']
-            x1, y1 = e.x, e.y
-            # 선택 사각형 업데이트
+            x0, y0, x1, y1 = state['x0'], state['y0'], e.x, e.y
             cv.coords('rect', min(x0,x1), min(y0,y1), max(x0,x1), max(y0,y1))
-            # 선택 영역만 원본 밝기로 표시 (clip)
-            cv.coords('bright', 0, 0)
-
-            # 크기 라벨
-            w = abs(x1 - x0)
-            h = abs(y1 - y0)
+            w, h = abs(x1-x0), abs(y1-y0)
             lx = min(x0, x1)
-            ly = max(y0, y1) + 6
-            if ly + 30 > cap_h:
-                ly = min(y0, y1) - 30
-            txt = f'  {w} × {h}  '
+            ly = max(y0, y1) + 8
+            if ly + 28 > mon_h:
+                ly = min(y0, y1) - 28
             cv.coords('sizelbl', lx, ly)
-            cv.itemconfig('sizelbl', text=txt)
-            # 배경 박스 크기 맞추기
+            cv.itemconfig('sizelbl', text=f'  {w} × {h}  ')
             bb = cv.bbox('sizelbl')
             if bb:
                 cv.coords('sizebg', bb[0]-2, bb[1]-2, bb[2]+2, bb[3]+2)
@@ -971,15 +954,11 @@ class App:
                 return
             state['dragging'] = False
             x0, y0 = state['x0'], state['y0']
-            x1, y1 = e.x, e.y
-            lx = min(x0, x1)
-            ly = min(y0, y1)
-            rx = max(x0, x1)
-            ry = max(y0, y1)
+            lx, ly = min(x0, e.x), min(y0, e.y)
+            rx, ry = max(x0, e.x), max(y0, e.y)
             ov.destroy()
             self.root.deiconify()
             if rx - lx > 10 and ry - ly > 10:
-                # off_x/off_y 더해서 실제 화면 좌표로 변환
                 self._on_region({
                     'left':   lx + off_x,
                     'top':    ly + off_y,
@@ -990,7 +969,6 @@ class App:
                 self._on_region(None)
 
         def on_cancel(e=None):
-            state['dragging'] = False
             ov.destroy()
             self.root.deiconify()
             self._on_region(None)
