@@ -903,131 +903,75 @@ class App:
     def _open_region_selector(self):
         import ctypes
 
-        # 마우스 위치 (물리픽셀)
+        # DPI 배율: 주모니터 물리픽셀 / tkinter 논리픽셀
         try:
-            class _PT(ctypes.Structure):
-                _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
-            pt = _PT()
-            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-            mx, my = pt.x, pt.y
-        except Exception:
-            mx, my = 0, 0
-
-        # mss로 현재 모니터 캡처
-        try:
-            with mss.mss() as sct:
-                target_mon = sct.monitors[1]
-                for m in sct.monitors[1:]:
-                    if (m['left'] <= mx < m['left'] + m['width'] and
-                            m['top'] <= my < m['top'] + m['height']):
-                        target_mon = m
-                        break
-                shot   = sct.grab(target_mon)
-                img    = Image.frombytes('RGB', shot.size, shot.bgra, 'raw', 'BGRX')
-                # mss 물리픽셀 기준
-                phys_left = target_mon['left']
-                phys_top  = target_mon['top']
-                phys_w    = target_mon['width']
-                phys_h    = target_mon['height']
-        except Exception as ex:
-            self.root.deiconify()
-            messagebox.showerror('오류', f'캡처 실패: {ex}')
-            return
-
-        # tkinter 논리픽셀 화면 크기 (주 모니터 기준)
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
-
-        # DPI = 주 모니터 물리픽셀 / 주 모니터 논리픽셀
-        # GetSystemMetrics(0/1) = 주 모니터 물리픽셀
-        try:
-            import ctypes as _ct
-            pm_w = _ct.windll.user32.GetSystemMetrics(0)
-            pm_h = _ct.windll.user32.GetSystemMetrics(1)
-            dpi = pm_w / sw if sw > 0 else 1.0
+            sw = self.root.winfo_screenwidth()
+            pw = ctypes.windll.user32.GetSystemMetrics(0)
+            dpi = pw / sw if sw > 0 else 1.0
         except Exception:
             dpi = 1.0
 
-        # 오버레이 위치: 물리픽셀을 논리픽셀로 변환
-        ov_w = int(phys_w / dpi)
-        ov_h = int(phys_h / dpi)
-        ov_x = int(phys_left / dpi)
-        ov_y = int(phys_top  / dpi)
+        # 원래 잘 되던 방식: fullscreen 반투명 창
+        sel = tk.Toplevel()
+        sel.attributes('-fullscreen', True)
+        sel.attributes('-alpha', 0.4)
+        sel.attributes('-topmost', True)
+        sel.configure(bg='black')
+        sel.lift()
+        sel.focus_force()
 
-        ov = tk.Toplevel()
-        ov.overrideredirect(True)
-        ov.attributes('-topmost', True)
-        ov.geometry(f'{ov_w}x{ov_h}+{ov_x}+{ov_y}')
-        ov.update()
+        canvas = tk.Canvas(sel, cursor='cross', bg='black', highlightthickness=0)
+        canvas.pack(fill='both', expand=True)
 
-        # 배경: mss 캡처 이미지를 논리픽셀 크기로 리사이즈
-        dimmed = Image.blend(img, Image.new('RGB', (phys_w, phys_h), (0,0,0)), 0.4)
-        if phys_w != ov_w or phys_h != ov_h:
-            dimmed = dimmed.resize((ov_w, ov_h), Image.LANCZOS)
-        bg_photo = ImageTk.PhotoImage(dimmed)
+        tk.Label(sel, text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
+                 bg='black', fg='white',
+                 font=('맑은 고딕', 14, 'bold')).place(relx=0.5, rely=0.05, anchor='center')
 
-        cv = tk.Canvas(ov, cursor='crosshair', width=ov_w, height=ov_h,
-                       highlightthickness=0, bd=0)
-        cv.pack()
-        cv.create_image(0, 0, anchor='nw', image=bg_photo)
-        cv._keep = bg_photo
+        size_lbl = tk.Label(sel, text='', bg='#cc0000', fg='white',
+                             font=('Consolas', 11, 'bold'), padx=8, pady=3)
 
-        cv.create_text(ov_w // 2, 40,
-                       text='드래그하여 녹화 영역을 선택하세요  [ ESC = 취소 ]',
-                       fill='white', font=('맑은 고딕', 14, 'bold'))
+        state = {'sx': 0, 'sy': 0, 'rect': None}
 
-        size_lbl = tk.Label(ov, text='', bg='#cc0000', fg='white',
-                             font=('Consolas', 12, 'bold'), padx=8, pady=4)
+        def press(e):
+            state['sx'], state['sy'] = e.x, e.y
+            state['rect'] = canvas.create_rectangle(
+                e.x, e.y, e.x, e.y, outline='red', width=3)
 
-        state = {'x0': 0, 'y0': 0, 'dragging': False}
-
-        def on_press(e):
-            state['x0'], state['y0'] = e.x, e.y
-            state['dragging'] = True
-            cv.delete('rect')
-            cv.create_rectangle(e.x, e.y, e.x, e.y,
-                                 outline='#00d4ff', width=2, tags='rect')
-
-        def on_drag(e):
-            if not state['dragging']: return
-            x0, y0 = state['x0'], state['y0']
-            cv.coords('rect', min(x0,e.x), min(y0,e.y), max(x0,e.x), max(y0,e.y))
-            w = int(abs(e.x - x0) * dpi)
-            h = int(abs(e.y - y0) * dpi)
+        def drag(e):
+            canvas.coords(state['rect'], state['sx'], state['sy'], e.x, e.y)
+            w = int(abs(e.x - state['sx']) * dpi)
+            h = int(abs(e.y - state['sy']) * dpi)
             size_lbl.config(text=f' {w} × {h} ')
-            lx = min(e.x + 10, ov_w - 160)
-            ly = min(e.y + 10, ov_h - 40)
+            lx = min(e.x + 12, sel.winfo_width() - 160)
+            ly = min(e.y + 12, sel.winfo_height() - 40)
             size_lbl.place(x=lx, y=ly)
 
-        def on_release(e):
-            if not state['dragging']: return
-            state['dragging'] = False
-            lx = min(state['x0'], e.x)
-            ly = min(state['y0'], e.y)
-            rx = max(state['x0'], e.x)
-            ry = max(state['y0'], e.y)
-            ov.destroy()
+        def release(e):
+            x1 = min(state['sx'], e.x)
+            y1 = min(state['sy'], e.y)
+            x2 = max(state['sx'], e.x)
+            y2 = max(state['sy'], e.y)
+            sel.destroy()
             self.root.deiconify()
-            if rx - lx > 10 and ry - ly > 10:
-                # tkinter 논리좌표 → mss 물리좌표
+            if x2 - x1 > 10 and y2 - y1 > 10:
                 self._on_region({
-                    'left':   int(lx * dpi) + phys_left,
-                    'top':    int(ly * dpi) + phys_top,
-                    'width':  int((rx - lx) * dpi),
-                    'height': int((ry - ly) * dpi),
+                    'left':   int(x1 * dpi),
+                    'top':    int(y1 * dpi),
+                    'width':  int((x2 - x1) * dpi),
+                    'height': int((y2 - y1) * dpi),
                 })
             else:
                 self._on_region(None)
 
-        def on_cancel(e=None):
-            ov.destroy()
+        def cancel(e=None):
+            sel.destroy()
             self.root.deiconify()
             self._on_region(None)
 
-        cv.bind('<ButtonPress-1>',   on_press)
-        cv.bind('<B1-Motion>',       on_drag)
-        cv.bind('<ButtonRelease-1>', on_release)
-        ov.bind('<Escape>',          on_cancel)
+        canvas.bind('<ButtonPress-1>',   press)
+        canvas.bind('<B1-Motion>',       drag)
+        canvas.bind('<ButtonRelease-1>', release)
+        sel.bind('<Escape>',             cancel)
 
     def _on_region(self, region):
         self.root.deiconify()
