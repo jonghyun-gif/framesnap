@@ -973,6 +973,17 @@ class App:
         ov.lift()
         ov.update()
 
+        # ★ 디버그: 실제 값을 팝업으로 확인
+        messagebox.showinfo('디버그',
+            f'logic_sw={logic_sw}, logic_sh={logic_sh}\n'
+            f'phys_main={phys_main_w}x{phys_main_h}\n'
+            f'dpi_x={dpi_x:.3f}, dpi_y={dpi_y:.3f}\n'
+            f'phys_w={phys_w}, phys_h={phys_h}\n'
+            f'ov_w={ov_w}, ov_h={ov_h}\n'
+            f'ov_x={ov_x}, ov_y={ov_y}\n'
+            f'off_x={off_x}, off_y={off_y}'
+        )
+
         # ── 5. 배경 이미지: 논리픽셀 크기로 리사이즈
         dimmed = Image.blend(img, Image.new('RGB', (phys_w, phys_h), (0,0,0)), 0.45)
         display = dimmed.resize((ov_w, ov_h), Image.LANCZOS) if (phys_w != ov_w) else dimmed
